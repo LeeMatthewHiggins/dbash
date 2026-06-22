@@ -9,3 +9,5 @@ library;
 export 'src/fs/file_system.dart';
 export 'src/fs/in_memory_fs.dart';
 export 'src/fs/path_utils.dart';
+export 'src/parser/lexer.dart' show Lexer, LexerOptions, readHeredocDelimiter;
+export 'src/parser/token.dart';
