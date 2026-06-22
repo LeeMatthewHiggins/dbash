@@ -1,0 +1,18 @@
+# Reference clone of upstream just-bash (not part of this package)
+legacy-source/
+
+# Dart / Pub
+.dart_tool/
+.packages
+build/
+pubspec.lock
+doc/api/
+
+# Generated code
+*.g.dart
+*.freezed.dart
+
+# IDE
+.idea/
+.vscode/
+*.iml
