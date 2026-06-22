@@ -14,6 +14,12 @@ String lit(WordNode w) => (w.parts.single as LiteralPart).value;
 
 void main() {
   group('plain commands (the normal path)', () {
+    test('bare command with no args or expansion parses', () {
+      final c = cmd('ls');
+      expect(lit(c.name!), 'ls');
+      expect(c.args, isEmpty);
+    });
+
     test('echo hi', () {
       final c = cmd('echo hi');
       expect(lit(c.name!), 'echo');
@@ -195,17 +201,39 @@ void main() {
     });
   });
 
-  group('not-yet-ported expansions throw clearly', () {
-    test('command substitution', () {
+  // These stubbed sub-parsers are not yet ported. The assertions make the
+  // boundaries visible in the suite so the gaps cannot regress silently
+  // (per review Finding 1).
+  group('not-yet-ported boundaries throw UnimplementedError', () {
+    test(r'command substitution $(...)', () {
       expect(() => parse(r'echo $(date)'), throwsUnimplementedError);
     });
 
-    test('arithmetic expansion', () {
+    test(r'arithmetic expansion $((...))', () {
       expect(() => parse(r'echo $((1 + 2))'), throwsUnimplementedError);
+    });
+
+    test(r'old-style arithmetic $[...]', () {
+      expect(() => parse(r'echo $[1 + 2]'), throwsUnimplementedError);
     });
 
     test('backtick substitution', () {
       expect(() => parse('echo `date`'), throwsUnimplementedError);
+    });
+
+    test('arithmetic command (( ... ))', () {
+      expect(() => parse('(( 1 + 2 ))'), throwsUnimplementedError);
+    });
+
+    test('conditional command [[ ... ]]', () {
+      expect(() => parse('[[ x ]]'), throwsUnimplementedError);
+    });
+
+    test('C-style for uses arithmetic and throws', () {
+      expect(
+        () => parse('for ((i=0; i<3; i++)); do echo x; done'),
+        throwsUnimplementedError,
+      );
     });
   });
 }
