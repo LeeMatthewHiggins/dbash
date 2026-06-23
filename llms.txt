@@ -1,0 +1,22 @@
+# dbash
+
+> A pure Dart bash interpreter with an in-memory virtual filesystem — a sandboxed shell for AI agents and Dart/Flutter apps. A faithful port of just-bash ("Bash for Agents"). The engine is web-safe (no dart:io) and runs scripts against a virtual filesystem with no real disk or network access by default. Status: in active development — filesystem, lexer, AST, and most of the parser are done; the interpreter, host `Bash.exec` API, CLI, and MCP server are planned.
+
+## Documentation
+
+- [README](README.md): overview, install, current vs. planned API, roadmap.
+- [AGENTS.md](AGENTS.md): how AI coding agents should work in this repo (build/test commands, architecture, conventions).
+- [CHANGELOG](CHANGELOG.md): what has landed so far.
+- [NOTICE](NOTICE.md): Apache-2.0 attribution to upstream just-bash.
+
+## Public API (package:dbash/dbash.dart)
+
+- `parse(String source) -> ScriptNode`: parse a bash script into an AST.
+- `Lexer(source).tokenize() -> List<Token>`: tokenize a bash script.
+- `InMemoryFs(Map<String, Object> files)`: in-memory virtual filesystem (`readFile`, `writeFile`, `mkdir`, `stat`, symlinks, encodings).
+- AST node types (`ScriptNode`, `PipelineNode`, `SimpleCommandNode`, `WordNode`, …) for walking parsed scripts.
+- `Bash` / `Bash.exec` (planned): run a script in the sandbox, returning `{ stdout, stderr, exitCode }`.
+
+## Upstream reference
+
+- [just-bash](https://github.com/vercel-labs/just-bash): the TypeScript project dbash is ported from.
