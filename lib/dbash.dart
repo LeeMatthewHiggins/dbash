@@ -14,3 +14,8 @@ export 'src/parser/lexer.dart' show Lexer, LexerOptions, readHeredocDelimiter;
 export 'src/parser/parser.dart' show Parser, parse;
 export 'src/parser/parser_types.dart' show ParseError, ParseException;
 export 'src/parser/token.dart';
+export 'src/runtime/bash.dart' show Bash;
+export 'src/runtime/command.dart'
+    show Command, CommandContext, CommandHandler, CommandRegistry, ExecResult,
+        defineCommand;
+export 'src/runtime/expansion.dart' show ExpansionError;
