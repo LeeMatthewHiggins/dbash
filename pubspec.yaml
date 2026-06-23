@@ -3,7 +3,7 @@ description: >-
   A pure Dart port of just-bash: a simulated bash environment with a virtual
   filesystem. Bash for Dart/Flutter agents.
 version: 0.1.0
-repository: https://github.com/wearemobilefirst/dbash
+repository: https://github.com/LeeMatthewHiggins/dbash
 
 environment:
   sdk: ^3.6.0
