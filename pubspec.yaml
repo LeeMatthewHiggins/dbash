@@ -1,9 +1,18 @@
 name: dbash
 description: >-
-  A pure Dart port of just-bash: a simulated bash environment with a virtual
-  filesystem. Bash for Dart/Flutter agents.
+  A pure Dart bash interpreter with a virtual filesystem — a sandboxed shell
+  for AI agents and Dart/Flutter apps. Ported from just-bash.
 version: 0.1.0
 repository: https://github.com/LeeMatthewHiggins/dbash
+homepage: https://github.com/LeeMatthewHiggins/dbash
+issue_tracker: https://github.com/LeeMatthewHiggins/dbash/issues
+
+topics:
+  - bash
+  - shell
+  - interpreter
+  - sandbox
+  - agents
 
 environment:
   sdk: ^3.6.0
@@ -14,3 +23,8 @@ dependencies:
 dev_dependencies:
   test: ^1.25.0
   very_good_analysis: ^9.0.0
+
+# Once bin/dbash.dart lands (plan phase 9), expose the CLI so
+# `dart pub global activate dbash` provides a `dbash` command:
+# executables:
+#   dbash:
