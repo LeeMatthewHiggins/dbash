@@ -62,6 +62,9 @@ class Expander {
 
   static final RegExp _ifsWs = RegExp(r'[ \t\n]+');
 
+  static bool _isIfsWs(int code) =>
+      code == 0x20 || code == 0x09 || code == 0x0a;
+
   Future<String> _commandSubstitution(ScriptNode body) {
     final run = _runSub;
     if (run == null) {
@@ -189,14 +192,33 @@ class Expander {
 
     void appendSplit(String value) {
       if (value.isEmpty) return;
-      final pieces = value.split(_ifsWs);
-      for (var i = 0; i < pieces.length; i++) {
-        if (i == 0) {
-          cur = (cur ?? '') + pieces[0];
-        } else {
-          fields.add(cur ?? '');
-          cur = pieces[i];
+      // IFS word splitting (default whitespace): runs of whitespace delimit
+      // fields, and leading/trailing whitespace does NOT produce empty fields.
+      final hasLead = _isIfsWs(value.codeUnitAt(0));
+      final hasTrail = _isIfsWs(value.codeUnitAt(value.length - 1));
+      final tokens = value.split(_ifsWs).where((t) => t.isNotEmpty).toList();
+      if (tokens.isEmpty) {
+        // All whitespace: close the current field if it has content.
+        if (cur != null) {
+          fields.add(cur!);
+          cur = null;
         }
+        return;
+      }
+      if (hasLead && cur != null) {
+        fields.add(cur!);
+        cur = null;
+      }
+      for (var i = 0; i < tokens.length; i++) {
+        if (i > 0) {
+          fields.add(cur ?? '');
+          cur = null;
+        }
+        cur = (cur ?? '') + tokens[i];
+      }
+      if (hasTrail) {
+        fields.add(cur ?? '');
+        cur = null;
       }
     }
 

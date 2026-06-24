@@ -3,6 +3,86 @@ import 'package:dbash/dbash.dart';
 import 'package:test/test.dart';
 
 void main() {
+  group('word splitting of unquoted substitution (review: kumar)', () {
+    test('leading/trailing IFS whitespace produces no empty fields', () async {
+      final r = await Bash().exec(
+        r'for w in $(echo "  a  "); do echo "[$w]"; done',
+      );
+      expect(r.stdout, '[a]\n');
+    });
+
+    test('interior whitespace splits; neighbours stay joined', () async {
+      final r = await Bash(env: {'U': ' a '}).exec(
+        r'for w in x${U}y; do echo "[$w]"; done',
+      );
+      expect(r.stdout, '[x]\n[a]\n[y]\n');
+    });
+
+    test('whitespace-only substitution yields no fields', () async {
+      final r = await Bash().exec(
+        r'n=0; for w in $(echo "   "); do n=1; done; echo $n',
+      );
+      expect(r.stdout, '0\n');
+    });
+  });
+
+  group('backtick escapes and quoting (review: data)', () {
+    test('backtick inside double quotes', () async {
+      expect((await Bash().exec('echo "x=`echo hi`"')).stdout, 'x=hi\n');
+    });
+
+    test(r'\$ escape inside backticks defers expansion to the inner shell',
+        () async {
+      // `echo \$HOME` -> inner command is `echo $HOME` -> HOME value.
+      expect((await Bash().exec(r'echo `echo \$HOME`')).stdout, '/home/user\n');
+    });
+
+    test(r'\" escape is special only inside double quotes', () async {
+      final r = await Bash().exec(r'echo "`echo \"hi\"`"');
+      expect(r.stdout, 'hi\n');
+    });
+  });
+
+  group('error boundaries (review: data)', () {
+    test(r'unterminated $( throws ParseException', () {
+      expect(() => Bash().exec(r'echo $(echo hi'),
+          throwsA(isA<ParseException>()));
+    });
+
+    test('unterminated backtick throws ParseException', () {
+      expect(() => Bash().exec('echo `echo hi'),
+          throwsA(isA<ParseException>()));
+    });
+  });
+
+  group('parser-level disambiguation (review: data)', () {
+    test(r'$(( with inner subshell parses as command substitution', () {
+      final cmd = parse(r'echo $((echo a); (echo b))')
+          .statements.single.pipelines.single.commands.single
+          as SimpleCommandNode;
+      expect(cmd.args.single.parts.single, isA<CommandSubstitutionPart>());
+    });
+  });
+
+  group('propagation and trimming (review: data)', () {
+    test('stderr from a substitution propagates', () async {
+      final r = await Bash().exec(r'x=$(nosuchcmd); echo after');
+      expect(r.stdout, 'after\n');
+      expect(r.stderr, contains('command not found'));
+    });
+
+    test('only trailing newlines are stripped — trailing spaces stay',
+        () async {
+      final r = await Bash().exec(r'''x=$(printf 'hi   '); echo "[$x]"''');
+      expect(r.stdout, '[hi   ]\n');
+    });
+
+    test('all trailing newlines collapse', () async {
+      final r = await Bash().exec(r'''x=$(printf 'x\n\n\n'); echo "[$x]"''');
+      expect(r.stdout, '[x]\n');
+    });
+  });
+
   group(r'$(...) command substitution', () {
     test('substitutes captured stdout', () async {
       expect(
