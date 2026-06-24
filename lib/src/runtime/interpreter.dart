@@ -58,7 +58,9 @@ class Interpreter {
     required this.fs,
     required this.state,
     required this.commands,
-  }) : _expander = Expander(state);
+  }) {
+    _expander = Expander(state, commandSubstitution: _runCommandSubstitution);
+  }
 
   /// The virtual filesystem.
   final FileSystem fs;
@@ -69,7 +71,7 @@ class Interpreter {
   /// The command registry (built-ins + host commands).
   final CommandRegistry commands;
 
-  final Expander _expander;
+  late final Expander _expander;
   final StringBuffer _stderr = StringBuffer();
 
   /// Execute a parsed [script] and return the aggregated result.
@@ -174,27 +176,29 @@ class Interpreter {
     SimpleCommandNode node,
     String stdin,
   ) async {
-    // Standalone assignments persist to shell state.
+    // Standalone assignments persist to shell state. Their exit status is the
+    // status of the last command substitution they ran (else 0) — so set the
+    // default first and let any `$(...)` inside the RHS overwrite it.
     if (node.name == null) {
+      state.lastExitCode = 0;
       for (final a in node.assignments) {
-        _applyAssignment(a, state.env);
+        await _applyAssignment(a, state.env);
       }
       // A bare redirection (e.g. `> file`) still creates/truncates the target.
       final plan = await _planRedirections(node.redirections, stdin);
       final out = await _route(const ExecResult(), plan);
-      state.lastExitCode = 0;
-      return ExecResult(stdout: out);
+      return ExecResult(stdout: out, exitCode: state.lastExitCode);
     }
 
     // Prefix assignments apply to a temp env for this command only.
     final env = Map<String, String>.of(state.env);
     for (final a in node.assignments) {
-      _applyAssignment(a, env);
+      await _applyAssignment(a, env);
     }
 
     final argv = [
-      ..._expander.expandWord(node.name!),
-      ..._expander.expandWords(node.args),
+      ...await _expander.expandWord(node.name!),
+      ...await _expander.expandWords(node.args),
     ];
 
     // Redirections are planned (and validated) before the command runs so it
@@ -278,7 +282,7 @@ class Interpreter {
   Future<ExecResult> _execFor(ForNode node, String stdin) async {
     final values = node.words == null
         ? state.positionalParams
-        : _expander.expandWords(node.words!);
+        : await _expander.expandWords(node.words!);
     var stdout = '';
     for (final v in values) {
       state.env[node.variable] = v;
@@ -303,6 +307,25 @@ class Interpreter {
     return ExecResult(stdout: stdout, exitCode: state.lastExitCode);
   }
 
+  /// Run a command-substitution body in a subshell sharing the filesystem,
+  /// returning its stdout with trailing newlines stripped (bash semantics).
+  /// Assignments inside `$(...)` do not leak to the parent; `$?` and any
+  /// stderr do propagate.
+  Future<String> _runCommandSubstitution(ScriptNode body) async {
+    final childState = ShellState(
+      env: Map<String, String>.of(state.env),
+      cwd: state.cwd,
+      exported: {...state.exported},
+      positionalParams: state.positionalParams,
+      shellName: state.shellName,
+    );
+    final child = Interpreter(fs: fs, state: childState, commands: commands);
+    final result = await child.run(body);
+    state.lastExitCode = result.exitCode;
+    if (result.stderr.isNotEmpty) _stderr.write(result.stderr);
+    return result.stdout.replaceFirst(RegExp(r'\n+$'), '');
+  }
+
   Future<String> _runStatements(List<StatementNode> statements) async {
     var stdout = '';
     for (final s in statements) {
@@ -312,11 +335,15 @@ class Interpreter {
     return stdout;
   }
 
-  void _applyAssignment(AssignmentNode a, Map<String, String> target) {
+  Future<void> _applyAssignment(
+    AssignmentNode a,
+    Map<String, String> target,
+  ) async {
     if (a.array != null) {
       throw UnimplementedError('array assignment is not in the MVP yet');
     }
-    final value = a.value == null ? '' : _expander.expandToString(a.value!);
+    final value =
+        a.value == null ? '' : await _expander.expandToString(a.value!);
     if (a.append) {
       target[a.name] = (target[a.name] ?? '') + value;
     } else {
@@ -345,7 +372,7 @@ class Interpreter {
       if (r.fdVariable != null) {
         throw UnimplementedError('{fd} redirections are not in the MVP yet');
       }
-      final word = _expander.expandToString(target);
+      final word = await _expander.expandToString(target);
       final path = paths.resolvePath(state.cwd, word);
       switch (r.operator) {
         case '<':
