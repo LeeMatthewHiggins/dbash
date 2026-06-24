@@ -36,7 +36,8 @@ void main() {
 
     test('reads from the shared virtual filesystem', () async {
       final bash = Bash(files: {'/f.txt': 'content\n'});
-      expect((await bash.exec(r'echo "[$(cat /f.txt)]"')).stdout, '[content]\n');
+      expect(
+          (await bash.exec(r'echo "[$(cat /f.txt)]"')).stdout, '[content]\n');
     });
 
     test('nested substitution', () async {
@@ -64,6 +65,62 @@ void main() {
   group('backtick substitution', () {
     test('legacy backtick works like dollar-paren', () async {
       expect((await Bash().exec('echo `echo hi`')).stdout, 'hi\n');
+    });
+  });
+
+  group('exit status of an empty command word (POSIX 2.9.1)', () {
+    test(r'bare $(false) carries the substitution status', () async {
+      // No command name remains after expansion; $? must be the last
+      // command substitution's status, not a hard-reset 0.
+      expect((await Bash().exec(r'$(false); echo $?')).stdout, '1\n');
+    });
+
+    test(r'bare $(true) yields 0', () async {
+      expect((await Bash().exec(r'$(true); echo $?')).stdout, '0\n');
+    });
+
+    test('an empty word with no substitution still yields 0', () async {
+      // No substitution ran, so the POSIX rule does not apply: status is 0,
+      // not the carried-over status of a prior command.
+      expect(
+        (await Bash().exec(r'false; e=; $e; echo $?')).stdout,
+        '0\n',
+      );
+    });
+
+    test(r'$(true)$(false) takes the LAST substitution performed', () async {
+      expect((await Bash().exec(r'$(true)$(false); echo $?')).stdout, '1\n');
+    });
+
+    test('backtick empty command word carries the status', () async {
+      expect((await Bash().exec(r'`false`; echo $?')).stdout, '1\n');
+    });
+
+    test(r'an empty $(false) condition takes the else branch', () async {
+      // The status reset previously made `if $(false)` read as success and
+      // silently run the wrong branch.
+      final r = await Bash().exec(
+        r'if $(false); then echo y; else echo n; fi',
+      );
+      expect(r.stdout, 'n\n');
+    });
+  });
+
+  group(r'$? is readable during expansion (no pre-reset)', () {
+    test(r'assignment RHS can read $? of the previous command', () async {
+      // Regression: resetting lastExitCode before expanding the RHS broke
+      // `x=$?` — it always read 0.
+      expect((await Bash().exec(r'false; x=$?; echo $x')).stdout, '1\n');
+    });
+
+    test(r'x=$? after a success reads 0', () async {
+      expect((await Bash().exec(r'true; x=$?; echo $x')).stdout, '0\n');
+    });
+
+    test('a masked substitution failure does not surface', () async {
+      // echo succeeds, so the failed $(false) inside it is intentionally
+      // masked — the non-empty command path is unaffected by the fix.
+      expect((await Bash().exec(r'echo "$(false)"; echo $?')).stdout, '\n0\n');
     });
   });
 }

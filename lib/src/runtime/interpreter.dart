@@ -73,6 +73,7 @@ class Interpreter {
 
   late final Expander _expander;
   final StringBuffer _stderr = StringBuffer();
+  int _cmdSubsRun = 0;
 
   /// Execute a parsed [script] and return the aggregated result.
   Future<ExecResult> run(ScriptNode script) async {
@@ -177,19 +178,27 @@ class Interpreter {
     String stdin,
   ) async {
     // Standalone assignments persist to shell state. Their exit status is the
-    // status of the last command substitution they ran (else 0) — so set the
-    // default first and let any `$(...)` inside the RHS overwrite it.
+    // status of the last command substitution they ran, else 0 (POSIX 2.9.1).
+    // We must NOT reset $? before expanding the RHS — `x=$?` has to read the
+    // previous command's status — so default to 0 only when no substitution
+    // actually ran (tracked by _cmdSubsRun); otherwise _runCommandSubstitution
+    // has already set lastExitCode to the substitution's status.
     if (node.name == null) {
-      state.lastExitCode = 0;
+      final subsBefore = _cmdSubsRun;
       for (final a in node.assignments) {
         await _applyAssignment(a, state.env);
       }
       // A bare redirection (e.g. `> file`) still creates/truncates the target.
       final plan = await _planRedirections(node.redirections, stdin);
       final out = await _route(const ExecResult(), plan);
+      if (_cmdSubsRun == subsBefore) state.lastExitCode = 0;
       return ExecResult(stdout: out, exitCode: state.lastExitCode);
     }
 
+    // Same POSIX rule for a command whose name/args expand to nothing: count
+    // substitutions across the expansion so an empty `argv` keeps the last
+    // substitution's status (`$(false)`) but a bare `$emptyvar` still yields 0.
+    final subsBefore = _cmdSubsRun;
     // Prefix assignments apply to a temp env for this command only.
     final env = Map<String, String>.of(state.env);
     for (final a in node.assignments) {
@@ -207,8 +216,8 @@ class Interpreter {
 
     if (argv.isEmpty) {
       final out = await _route(const ExecResult(), plan);
-      state.lastExitCode = 0;
-      return ExecResult(stdout: out);
+      if (_cmdSubsRun == subsBefore) state.lastExitCode = 0;
+      return ExecResult(stdout: out, exitCode: state.lastExitCode);
     }
 
     final cmdResult =
@@ -312,11 +321,14 @@ class Interpreter {
   /// Assignments inside `$(...)` do not leak to the parent; `$?` and any
   /// stderr do propagate.
   Future<String> _runCommandSubstitution(ScriptNode body) async {
+    _cmdSubsRun++;
     final childState = ShellState(
       env: Map<String, String>.of(state.env),
       cwd: state.cwd,
       exported: {...state.exported},
-      positionalParams: state.positionalParams,
+      // Copy (not share) so a future `set`/`shift` in the subshell cannot
+      // leak back to the parent — env/exported are already copied above.
+      positionalParams: List.of(state.positionalParams),
       shellName: state.shellName,
     );
     final child = Interpreter(fs: fs, state: childState, commands: commands);
