@@ -95,17 +95,26 @@ class Interpreter {
   Future<ExecResult> _execStatement(StatementNode stmt, String stdin) async {
     var stdout = '';
     var run = true;
-    for (var i = 0; i < stmt.pipelines.length; i++) {
-      if (i > 0) {
-        final op = stmt.operators[i - 1];
-        if (op == '&&') run = state.lastExitCode == 0;
-        if (op == '||') run = state.lastExitCode != 0;
-        // ';' always runs.
-        if (op == ';') run = true;
+    // Single chokepoint: any ExpansionError raised while expanding argv,
+    // assignment RHS, for-word lists, or redirection targets anywhere beneath
+    // this statement becomes a shell-like stderr + exit code instead of an
+    // uncaught exception escaping Bash.exec.
+    try {
+      for (var i = 0; i < stmt.pipelines.length; i++) {
+        if (i > 0) {
+          final op = stmt.operators[i - 1];
+          if (op == '&&') run = state.lastExitCode == 0;
+          if (op == '||') run = state.lastExitCode != 0;
+          if (op == ';') run = true;
+        }
+        if (!run) continue;
+        final r = await _execPipeline(stmt.pipelines[i], stdin);
+        stdout += r.stdout;
       }
-      if (!run) continue;
-      final r = await _execPipeline(stmt.pipelines[i], stdin);
-      stdout += r.stdout;
+    } on ExpansionError catch (e) {
+      _stderr.write('dbash: ${e.message}\n');
+      state.lastExitCode = e.exitCode;
+      return ExecResult(stdout: stdout, exitCode: e.exitCode);
     }
     return ExecResult(stdout: stdout, exitCode: state.lastExitCode);
   }
@@ -133,12 +142,16 @@ class Interpreter {
       case SimpleCommandNode():
         return _execSimpleCommand(node, stdin);
       case IfNode():
+        _rejectRedirections(node.redirections, node.type);
         return _execIf(node, stdin);
       case ForNode():
+        _rejectRedirections(node.redirections, node.type);
         return _execFor(node, stdin);
       case WhileNode():
+        _rejectRedirections(node.redirections, node.type);
         return _execWhileUntil(node.condition, node.body, until: false);
       case UntilNode():
+        _rejectRedirections(node.redirections, node.type);
         return _execWhileUntil(node.condition, node.body, until: true);
       default:
         throw UnimplementedError(
@@ -147,17 +160,30 @@ class Interpreter {
     }
   }
 
+  /// Compound-command redirections are not in the MVP. Reject them visibly
+  /// rather than silently dropping them (see review of PR #4).
+  void _rejectRedirections(List<RedirectionNode> redirs, String nodeType) {
+    if (redirs.isNotEmpty) {
+      throw UnimplementedError(
+        'redirections on $nodeType are not in the MVP yet',
+      );
+    }
+  }
+
   Future<ExecResult> _execSimpleCommand(
     SimpleCommandNode node,
     String stdin,
   ) async {
-    // Assignment-only command: persist to shell state.
+    // Standalone assignments persist to shell state.
     if (node.name == null) {
       for (final a in node.assignments) {
         _applyAssignment(a, state.env);
       }
+      // A bare redirection (e.g. `> file`) still creates/truncates the target.
+      final plan = await _planRedirections(node.redirections, stdin);
+      final out = await _route(const ExecResult(), plan);
       state.lastExitCode = 0;
-      return const ExecResult();
+      return ExecResult(stdout: out);
     }
 
     // Prefix assignments apply to a temp env for this command only.
@@ -170,23 +196,38 @@ class Interpreter {
       ..._expander.expandWord(node.name!),
       ..._expander.expandWords(node.args),
     ];
+
+    // Redirections are planned (and validated) before the command runs so it
+    // sees the right stdin; outputs are routed afterwards.
+    final plan = await _planRedirections(node.redirections, stdin);
+
     if (argv.isEmpty) {
+      final out = await _route(const ExecResult(), plan);
       state.lastExitCode = 0;
-      return const ExecResult();
+      return ExecResult(stdout: out);
     }
 
-    final name = argv.first;
-    final args = argv.sublist(1);
+    final cmdResult =
+        await _runNamed(argv.first, argv.sublist(1), env, plan.stdin);
+    final out = await _route(cmdResult, plan);
+    state.lastExitCode = cmdResult.exitCode;
+    return ExecResult(stdout: out, exitCode: cmdResult.exitCode);
+  }
 
-    // Interpreter-level builtins.
+  /// Run a resolved command name, returning its raw result (stdout/stderr/exit
+  /// captured, not yet routed through redirections).
+  Future<ExecResult> _runNamed(
+    String name,
+    List<String> args,
+    Map<String, String> env,
+    String stdin,
+  ) async {
     switch (name) {
       case ':':
       case 'true':
-        state.lastExitCode = 0;
         return const ExecResult();
       case 'false':
-        state.lastExitCode = 1;
-        return const ExecResult();
+        return const ExecResult(exitCode: 1);
       case 'cd':
         return _builtinCd(args);
       case 'export':
@@ -195,15 +236,15 @@ class Interpreter {
         for (final n in args) {
           state.env.remove(n);
         }
-        state.lastExitCode = 0;
         return const ExecResult();
     }
 
     final command = commands[name];
     if (command == null) {
-      _stderr.write('dbash: $name: command not found\n');
-      state.lastExitCode = 127;
-      return const ExecResult();
+      return ExecResult(
+        stderr: 'dbash: $name: command not found\n',
+        exitCode: 127,
+      );
     }
 
     final ctx = CommandContext(
@@ -212,21 +253,10 @@ class Interpreter {
       env: env,
       stdin: stdin,
       exec: (cmd, {cwd, stdin}) =>
-          Interpreter(fs: fs, state: state, commands: commands)
-              .run(parse(cmd)),
+          Interpreter(fs: fs, state: state, commands: commands).run(parse(cmd)),
       getRegisteredCommands: () => commands.keys.toList(),
     );
-
-    try {
-      final result = await command.execute(args, ctx);
-      _stderr.write(result.stderr);
-      state.lastExitCode = result.exitCode;
-      return ExecResult(stdout: result.stdout, exitCode: result.exitCode);
-    } on ExpansionError catch (e) {
-      _stderr.write('dbash: ${e.message}\n');
-      state.lastExitCode = e.exitCode;
-      return const ExecResult();
-    }
+    return command.execute(args, ctx);
   }
 
   Future<ExecResult> _execIf(IfNode node, String stdin) async {
@@ -294,19 +324,141 @@ class Interpreter {
     }
   }
 
+  // --- redirections ----------------------------------------------------------
+
+  /// Validate and plan [redirs], reading any input file for stdin and computing
+  /// where fd 1 and fd 2 point. Throws [UnimplementedError] for redirection
+  /// forms outside the MVP (here-docs, `{fd}` vars, here-strings, unusual fds)
+  /// so the gap is visible rather than silent.
+  Future<_RedirPlan> _planRedirections(
+    List<RedirectionNode> redirs,
+    String stdin,
+  ) async {
+    var inStdin = stdin;
+    _FileTarget? dest1;
+    _FileTarget? dest2;
+    for (final r in redirs) {
+      final target = r.target;
+      if (target is! WordNode) {
+        throw UnimplementedError('here-doc redirection is not in the MVP yet');
+      }
+      if (r.fdVariable != null) {
+        throw UnimplementedError('{fd} redirections are not in the MVP yet');
+      }
+      final word = _expander.expandToString(target);
+      final path = paths.resolvePath(state.cwd, word);
+      switch (r.operator) {
+        case '<':
+          if (r.fd != null && r.fd != 0) {
+            throw UnimplementedError(
+              'input redirection on fd ${r.fd} is not in the MVP yet',
+            );
+          }
+          if (!await fs.exists(path)) {
+            throw ExpansionError('$word: No such file or directory');
+          }
+          inStdin = await fs.readFile(path);
+        case '>':
+        case '>|':
+          (dest1, dest2) = _assignFd(
+              r.fd ?? 1, _FileTarget(path, append: false), dest1, dest2);
+        case '>>':
+          (dest1, dest2) = _assignFd(
+              r.fd ?? 1, _FileTarget(path, append: true), dest1, dest2);
+        case '&>':
+          final t = _FileTarget(path, append: false);
+          dest1 = t;
+          dest2 = t;
+        case '&>>':
+          final t = _FileTarget(path, append: true);
+          dest1 = t;
+          dest2 = t;
+        case '>&':
+          final fd = r.fd ?? 1;
+          if (word == '1') {
+            if (fd == 2) {
+              dest2 = dest1;
+            } else if (fd != 1) {
+              _unsupportedFd(fd);
+            }
+          } else if (word == '2') {
+            if (fd == 1) {
+              dest1 = dest2;
+            } else if (fd != 2) {
+              _unsupportedFd(fd);
+            }
+          } else {
+            throw UnimplementedError(
+              'fd duplication to "$word" is not in the MVP yet',
+            );
+          }
+        default:
+          throw UnimplementedError(
+            'redirection operator ${r.operator} is not in the MVP yet',
+          );
+      }
+    }
+    return _RedirPlan(inStdin, dest1, dest2);
+  }
+
+  (_FileTarget?, _FileTarget?) _assignFd(
+    int fd,
+    _FileTarget t,
+    _FileTarget? d1,
+    _FileTarget? d2,
+  ) {
+    if (fd == 1) return (t, d2);
+    if (fd == 2) return (d1, t);
+    _unsupportedFd(fd);
+  }
+
+  Never _unsupportedFd(int fd) =>
+      throw UnimplementedError('redirection on fd $fd is not in the MVP yet');
+
+  /// Route a command [result] through the [plan]: file-bound streams are
+  /// written to the virtual FS, terminal stderr is buffered, and terminal
+  /// stdout is returned (to flow on to a pipe or the caller).
+  Future<String> _route(ExecResult result, _RedirPlan plan) async {
+    final sinks = <_FileTarget, StringBuffer>{};
+    var termOut = '';
+    var termErr = '';
+    void send(_FileTarget? dest, String content, {required bool isErr}) {
+      if (dest == null) {
+        if (isErr) {
+          termErr += content;
+        } else {
+          termOut += content;
+        }
+      } else {
+        (sinks[dest] ??= StringBuffer()).write(content);
+      }
+    }
+
+    send(plan.dest1, result.stdout, isErr: false);
+    send(plan.dest2, result.stderr, isErr: true);
+    for (final entry in sinks.entries) {
+      if (entry.key.append) {
+        await fs.appendFile(entry.key.path, entry.value.toString());
+      } else {
+        await fs.writeFile(entry.key.path, entry.value.toString());
+      }
+    }
+    if (termErr.isNotEmpty) _stderr.write(termErr);
+    return termOut;
+  }
+
   Future<ExecResult> _builtinCd(List<String> args) async {
-    final target = args.isEmpty
-        ? (state.env['HOME'] ?? '/home/user')
-        : args.first;
+    final target =
+        args.isEmpty ? (state.env['HOME'] ?? '/home/user') : args.first;
     final resolved = paths.resolvePath(state.cwd, target);
     if (!await fs.exists(resolved)) {
-      _stderr.write('dbash: cd: $target: No such file or directory\n');
-      state.lastExitCode = 1;
-      return const ExecResult();
+      return ExecResult(
+        stderr: 'dbash: cd: $target: No such file or directory\n',
+        exitCode: 1,
+      );
     }
     state.cwd = resolved;
     state.env['PWD'] = resolved;
-    state.lastExitCode = 0;
     return const ExecResult();
   }
 
@@ -324,7 +476,19 @@ class Interpreter {
         state.exported.add(arg);
       }
     }
-    state.lastExitCode = 0;
     return const ExecResult();
   }
+}
+
+class _FileTarget {
+  _FileTarget(this.path, {required this.append});
+  final String path;
+  final bool append;
+}
+
+class _RedirPlan {
+  _RedirPlan(this.stdin, this.dest1, this.dest2);
+  final String stdin;
+  final _FileTarget? dest1;
+  final _FileTarget? dest2;
 }
