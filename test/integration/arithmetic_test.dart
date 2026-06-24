@@ -49,6 +49,18 @@ void main() {
           '16 8 10 35\n');
     });
 
+    test('a digit too great for its base is rejected', () async {
+      for (final script in [
+        r'echo $((3#13))',
+        r'echo $((2#102))',
+        r'echo $((16#1g))',
+      ]) {
+        final r = await Bash().exec(script);
+        expect(r.exitCode, 1, reason: script);
+        expect(r.stderr, contains('value too great for base'), reason: script);
+      }
+    });
+
     test('assignment inside expansion persists', () async {
       expect(await out(r'echo $((n = 3 + 4)); echo $n'), '7\n7\n');
     });
@@ -90,6 +102,12 @@ void main() {
           r'sum=0; for ((i=1; i<=4; i++)); do sum=$((sum+i)); done; echo $sum';
       expect(await out(script), '10\n');
     });
+
+    test('zero iterations return success, not the prior status', () async {
+      final r =
+          await Bash().exec('false; for ((i=5; i<3; i++)); do echo x; done');
+      expect(r.exitCode, 0);
+    });
   });
 
   group(r'${var:offset:length} substring', () {
@@ -107,6 +125,16 @@ void main() {
 
     test('offset from a variable', () async {
       expect(await out(r'v=abcdef; n=2; echo ${v:n:2}'), 'cd\n');
+    });
+
+    test('negative offset before the start yields empty', () async {
+      expect(await out(r'v=hello; echo "[${v: -100}]"'), '[]\n');
+    });
+
+    test('negative length before the offset is an error', () async {
+      final r = await Bash().exec(r'v=hello; echo ${v:1:-100}');
+      expect(r.exitCode, 1);
+      expect(r.stderr, contains('substring expression < 0'));
     });
   });
 

@@ -361,18 +361,24 @@ class Expander {
 
   String _substring(String s, SubstringOp op) {
     var off = _evalArith(op.offset);
-    if (off < 0) off = s.length + off;
-    if (off < 0) off = 0;
+    if (off < 0) {
+      // bash: a negative offset counts from the end; if it resolves before the
+      // start of the string the result is empty (not the whole string).
+      off = s.length + off;
+      if (off < 0) return '';
+    }
     if (off > s.length) off = s.length;
     if (op.length == null) return s.substring(off);
     final lenVal = _evalArith(op.length!);
     int end;
     if (lenVal < 0) {
+      // bash: a negative length is an offset from the end; if it resolves
+      // before the start offset bash errors with "substring expression < 0".
       end = s.length + lenVal;
+      if (end < off) throw ArithmeticError('substring expression < 0');
     } else {
       end = off + lenVal;
     }
-    if (end < off) end = off;
     if (end > s.length) end = s.length;
     return s.substring(off, end);
   }

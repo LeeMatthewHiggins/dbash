@@ -106,6 +106,26 @@ num parseArithNumber(String s) {
   return _jsParseInt(s, 10);
 }
 
+/// Validates a `base#num` token. Returns a bash-style error message when the
+/// base is out of range (2..64) or any digit is too great for the base, or
+/// null when the token is well-formed.
+String? _baseTokenError(String token) {
+  final hash = token.indexOf('#');
+  if (hash < 0) return null;
+  final base = int.tryParse(token.substring(0, hash)) ?? -1;
+  if (base < 2 || base > 64) {
+    return '$token: invalid arithmetic base (error token is "$token")';
+  }
+  final digits = token.substring(hash + 1);
+  for (var i = 0; i < digits.length; i++) {
+    final d = _digitValue(digits[i]);
+    if (d < 0 || d >= base) {
+      return '$token: value too great for base (error token is "$token")';
+    }
+  }
+  return null;
+}
+
 String _preprocessArithInput(String input) {
   var result = '';
   var i = 0;
@@ -648,6 +668,16 @@ _ArithResult _parseArithPrimary(
         expr: ArithNumberSubscriptNode(numStr, errorToken),
         pos: input.length,
       );
+    }
+    // A `base#num` token may carry digits that are valid base-64 alphabet
+    // characters yet exceed the declared base (e.g. `3#13`, `16#1g`). bash
+    // rejects these with "value too great for base" rather than silently
+    // truncating at the first out-of-range digit, so validate every digit.
+    if (seenHash) {
+      final err = _baseTokenError(numStr);
+      if (err != null) {
+        return (expr: ArithSyntaxErrorNode(numStr, err), pos: cur);
+      }
     }
     return (expr: ArithNumberNode(parseArithNumber(numStr)), pos: cur);
   }

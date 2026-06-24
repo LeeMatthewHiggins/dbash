@@ -329,6 +329,9 @@ class Interpreter {
   Future<ExecResult> _execCStyleFor(CStyleForNode node) async {
     var stdout = '';
     if (node.init != null) _arith.evaluate(node.init!);
+    // bash: a for loop's status is that of the last body command executed, or
+    // success when zero iterations run. Reset so a prior failure doesn't leak.
+    state.lastExitCode = 0;
     var guard = 0;
     while (guard++ < 1000000) {
       // An empty condition is treated as true (infinite loop until break).
