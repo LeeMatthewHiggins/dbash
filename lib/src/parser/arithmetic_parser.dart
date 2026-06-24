@@ -49,12 +49,22 @@ int _skipArithWs(String input, int pos) {
   return i;
 }
 
-int _digitValue(String c) {
+/// Digit value of [c] for [base]. For bases <= 36 (and 0x/octal/decimal),
+/// letters are case-insensitive (a/A = 10 .. z/Z = 35), matching JS `parseInt`
+/// and bash's rule that "if base <= 36, lowercase and uppercase may be used
+/// interchangeably". For bases 37-64 the extended bash alphabet applies:
+/// a-z = 10-35, A-Z = 36-61, @ = 62, _ = 63. Returns -1 for a non-digit.
+int _digitForBase(String c, int base) {
   if (c.isEmpty) return -1;
   final code = c.codeUnitAt(0);
   if (code >= 0x30 && code <= 0x39) return code - 0x30; // 0-9
-  if (code >= 0x61 && code <= 0x7a) return code - 0x61 + 10; // a-z
-  if (code >= 0x41 && code <= 0x5a) return code - 0x41 + 36; // A-Z
+  if (base <= 36) {
+    if (code >= 0x61 && code <= 0x7a) return code - 0x61 + 10; // a-z
+    if (code >= 0x41 && code <= 0x5a) return code - 0x41 + 10; // A-Z (== a-z)
+    return -1;
+  }
+  if (code >= 0x61 && code <= 0x7a) return code - 0x61 + 10; // a-z = 10-35
+  if (code >= 0x41 && code <= 0x5a) return code - 0x41 + 36; // A-Z = 36-61
   if (c == '@') return 62;
   if (c == '_') return 63;
   return -1;
@@ -75,7 +85,7 @@ num _jsParseInt(String s, int radix) {
   final start = i;
   var result = 0;
   while (i < s.length) {
-    final d = _digitValue(s[i]);
+    final d = _digitForBase(s[i], radix);
     if (d < 0 || d >= radix) break;
     result = result * radix + d;
     if (result > _maxSafeInteger) return _maxSafeInteger * sign;
@@ -97,11 +107,9 @@ num parseArithNumber(String s) {
     return _jsParseInt(numStr, base);
   }
   if (s.startsWith('0x') || s.startsWith('0X')) {
-    // In a `0x`/`0X` literal, hex digits are case-insensitive (`0xFF` == `0xff`).
-    // `_digitValue` maps uppercase `A-Z` to 36-61 to honour bash `base#num`
-    // semantics, so lowercase the hex body here to keep `A-F` in the 10-15 range
-    // without disturbing the `base#` path.
-    return _jsParseInt(s.substring(2).toLowerCase(), 16);
+    // Hex digits are case-insensitive; `_digitForBase` already folds case for
+    // bases <= 36, so `0xFF` == `0xff` == 255.
+    return _jsParseInt(s.substring(2), 16);
   }
   if (s.startsWith('0') && s.length > 1 && _arithDigits.hasMatch(s)) {
     if (_arith89.hasMatch(s)) return double.nan;
@@ -122,7 +130,7 @@ String? _baseTokenError(String token) {
   }
   final digits = token.substring(hash + 1);
   for (var i = 0; i < digits.length; i++) {
-    final d = _digitValue(digits[i]);
+    final d = _digitForBase(digits[i], base);
     if (d < 0 || d >= base) {
       return '$token: value too great for base (error token is "$token")';
     }

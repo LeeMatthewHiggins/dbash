@@ -64,6 +64,19 @@ void main() {
       expect(r.stdout, '256\n');
     });
 
+    test('case-insensitive bases <= 36 (base#num form)', () async {
+      // bash: for base <= 36, uppercase and lowercase are interchangeable.
+      expect(
+        await out(r'echo $((16#FF)) $((16#ff)) $((36#Z))'),
+        '255 255 35\n',
+      );
+    });
+
+    test('bases above 36 use the extended uppercase alphabet', () async {
+      // For base > 36, uppercase A-Z = 36-61 (distinct from lowercase).
+      expect(await out(r'echo $((37#A))'), '36\n');
+    });
+
     test('a digit too great for its base is rejected', () async {
       for (final script in [
         r'echo $((3#13))',
