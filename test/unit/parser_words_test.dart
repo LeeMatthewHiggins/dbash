@@ -201,24 +201,29 @@ void main() {
     });
   });
 
-  // These stubbed sub-parsers are not yet ported. The assertions make the
-  // boundaries visible in the suite so the gaps cannot regress silently
-  // (per review Finding 1).
-  group('not-yet-ported boundaries throw UnimplementedError', () {
-    test(r'command substitution $(...)', () {
-      expect(() => parse(r'echo $(date)'), throwsUnimplementedError);
+  group('command substitution now parses', () {
+    test(r'$(...) parses into a CommandSubstitutionPart', () {
+      final part = cmd(r'echo $(date)').args.single.parts.single;
+      expect(part, isA<CommandSubstitutionPart>());
+      expect((part as CommandSubstitutionPart).legacy, isFalse);
     });
 
+    test('backtick parses into a legacy CommandSubstitutionPart', () {
+      final part = cmd('echo `date`').args.single.parts.single;
+      expect(part, isA<CommandSubstitutionPart>());
+      expect((part as CommandSubstitutionPart).legacy, isTrue);
+    });
+  });
+
+  // These stubbed sub-parsers are not yet ported. The assertions make the
+  // boundaries visible in the suite so the gaps cannot regress silently.
+  group('not-yet-ported boundaries throw UnimplementedError', () {
     test(r'arithmetic expansion $((...))', () {
       expect(() => parse(r'echo $((1 + 2))'), throwsUnimplementedError);
     });
 
     test(r'old-style arithmetic $[...]', () {
       expect(() => parse(r'echo $[1 + 2]'), throwsUnimplementedError);
-    });
-
-    test('backtick substitution', () {
-      expect(() => parse('echo `date`'), throwsUnimplementedError);
     });
 
     test('arithmetic command (( ... ))', () {

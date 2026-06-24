@@ -43,31 +43,53 @@ abstract class ExpansionHost {
   String get shellName;
 }
 
+/// Runs a command-substitution body ([ScriptNode]) and returns its captured
+/// stdout (with trailing newlines already stripped).
+typedef CommandSubstitutionRunner = Future<String> Function(ScriptNode body);
+
 /// Expands [WordNode]s into argument fields.
 class Expander {
-  /// Creates an expander backed by [host].
-  Expander(this.host);
+  /// Creates an expander backed by [host]. [commandSubstitution], when
+  /// provided, runs `$(...)` / `` `...` `` bodies; without it, encountering one
+  /// throws [UnimplementedError].
+  Expander(this.host, {CommandSubstitutionRunner? commandSubstitution})
+      : _runSub = commandSubstitution;
 
   /// The shell state.
   final ExpansionHost host;
 
+  final CommandSubstitutionRunner? _runSub;
+
   static final RegExp _ifsWs = RegExp(r'[ \t\n]+');
 
+  static bool _isIfsWs(int code) =>
+      code == 0x20 || code == 0x09 || code == 0x0a;
+
+  Future<String> _commandSubstitution(ScriptNode body) {
+    final run = _runSub;
+    if (run == null) {
+      throw UnimplementedError(
+        'command substitution requires an interpreter host',
+      );
+    }
+    return run(body);
+  }
+
   /// Expand a list of [words] into argument fields.
-  List<String> expandWords(List<WordNode> words) {
+  Future<List<String>> expandWords(List<WordNode> words) async {
     final out = <String>[];
     for (final w in words) {
-      out.addAll(expandWord(w));
+      out.addAll(await expandWord(w));
     }
     return out;
   }
 
   /// Expand a single [word] into zero or more fields.
-  List<String> expandWord(WordNode word) {
+  Future<List<String>> expandWord(WordNode word) async {
     final combos = _braceExpand(word.parts);
     final fields = <String>[];
     for (final parts in combos) {
-      fields.addAll(_expandParts(parts));
+      fields.addAll(await _expandParts(parts));
     }
     return fields;
   }
@@ -162,7 +184,7 @@ class Expander {
 
   // --- field building --------------------------------------------------------
 
-  List<String> _expandParts(List<WordPart> parts) {
+  Future<List<String>> _expandParts(List<WordPart> parts) async {
     final fields = <String>[];
     String? cur;
 
@@ -170,14 +192,33 @@ class Expander {
 
     void appendSplit(String value) {
       if (value.isEmpty) return;
-      final pieces = value.split(_ifsWs);
-      for (var i = 0; i < pieces.length; i++) {
-        if (i == 0) {
-          cur = (cur ?? '') + pieces[0];
-        } else {
-          fields.add(cur ?? '');
-          cur = pieces[i];
+      // IFS word splitting (default whitespace): runs of whitespace delimit
+      // fields, and leading/trailing whitespace does NOT produce empty fields.
+      final hasLead = _isIfsWs(value.codeUnitAt(0));
+      final hasTrail = _isIfsWs(value.codeUnitAt(value.length - 1));
+      final tokens = value.split(_ifsWs).where((t) => t.isNotEmpty).toList();
+      if (tokens.isEmpty) {
+        // All whitespace: close the current field if it has content.
+        if (cur != null) {
+          fields.add(cur!);
+          cur = null;
         }
+        return;
+      }
+      if (hasLead && cur != null) {
+        fields.add(cur!);
+        cur = null;
+      }
+      for (var i = 0; i < tokens.length; i++) {
+        if (i > 0) {
+          fields.add(cur ?? '');
+          cur = null;
+        }
+        cur = (cur ?? '') + tokens[i];
+      }
+      if (hasTrail) {
+        fields.add(cur ?? '');
+        cur = null;
       }
     }
 
@@ -190,14 +231,15 @@ class Expander {
         case EscapedPart():
           appendLiteral(part.value);
         case DoubleQuotedPart():
-          appendLiteral(_expandQuoted(part.parts));
+          appendLiteral(await _expandQuoted(part.parts));
         case TildeExpansionPart():
           appendLiteral(_expandTilde(part));
         case GlobPart():
           appendLiteral(part.pattern);
         case ParameterExpansionPart():
-          appendSplit(_expandParameter(part));
+          appendSplit(await _expandParameter(part));
         case CommandSubstitutionPart():
+          appendSplit(await _commandSubstitution(part.body));
         case ArithmeticExpansionPart():
         case ProcessSubstitutionPart():
         case BraceExpansionPart():
@@ -211,7 +253,7 @@ class Expander {
     return fields;
   }
 
-  String _expandQuoted(List<WordPart> parts) {
+  Future<String> _expandQuoted(List<WordPart> parts) async {
     final sb = StringBuffer();
     for (final part in parts) {
       switch (part) {
@@ -222,10 +264,11 @@ class Expander {
         case SingleQuotedPart():
           sb.write(part.value);
         case ParameterExpansionPart():
-          sb.write(_expandParameter(part));
+          sb.write(await _expandParameter(part));
         case DoubleQuotedPart():
-          sb.write(_expandQuoted(part.parts));
+          sb.write(await _expandQuoted(part.parts));
         case CommandSubstitutionPart():
+          sb.write(await _commandSubstitution(part.body));
         case ArithmeticExpansionPart():
           throw UnimplementedError(
             'runtime expansion of ${part.type} is not in the MVP yet',
@@ -256,7 +299,7 @@ class Expander {
 
   // --- parameter expansion ---------------------------------------------------
 
-  String _expandParameter(ParameterExpansionPart part) {
+  Future<String> _expandParameter(ParameterExpansionPart part) async {
     final name = part.parameter;
     final raw = _resolveParameter(name);
     final op = part.operation;
@@ -269,11 +312,11 @@ class Expander {
     switch (op) {
       case DefaultValueOp():
         final cond = op.checkEmpty ? isEmpty : isUnset;
-        return cond ? _expandOpWord(op.word) : raw;
+        return cond ? await _expandOpWord(op.word) : raw;
       case AssignDefaultOp():
         final cond = op.checkEmpty ? isEmpty : isUnset;
         if (cond) {
-          final v = _expandOpWord(op.word);
+          final v = await _expandOpWord(op.word);
           host.setVar(name, v);
           return v;
         }
@@ -282,14 +325,14 @@ class Expander {
         final cond = op.checkEmpty ? isEmpty : isUnset;
         if (cond) {
           final msg = op.word != null
-              ? _expandOpWord(op.word!)
+              ? await _expandOpWord(op.word!)
               : 'parameter null or not set';
           throw ExpansionError('$name: $msg');
         }
         return raw;
       case UseAlternativeOp():
         final cond = op.checkEmpty ? !isEmpty : !isUnset;
-        return cond ? _expandOpWord(op.word) : '';
+        return cond ? await _expandOpWord(op.word) : '';
       case LengthOp():
         return (raw ?? '').length.toString();
       default:
@@ -299,11 +342,12 @@ class Expander {
     }
   }
 
-  String _expandOpWord(WordNode word) => expandWord(word).join(' ');
+  Future<String> _expandOpWord(WordNode word) async =>
+      (await expandWord(word)).join(' ');
 
   /// Expand [word] to a single string without word splitting (e.g. for the
   /// right-hand side of an assignment).
-  String expandToString(WordNode word) {
+  Future<String> expandToString(WordNode word) async {
     final sb = StringBuffer();
     for (final part in word.parts) {
       switch (part) {
@@ -314,14 +358,15 @@ class Expander {
         case EscapedPart():
           sb.write(part.value);
         case DoubleQuotedPart():
-          sb.write(_expandQuoted(part.parts));
+          sb.write(await _expandQuoted(part.parts));
         case ParameterExpansionPart():
-          sb.write(_expandParameter(part));
+          sb.write(await _expandParameter(part));
         case TildeExpansionPart():
           sb.write(_expandTilde(part));
         case GlobPart():
           sb.write(part.pattern);
         case CommandSubstitutionPart():
+          sb.write(await _commandSubstitution(part.body));
         case ArithmeticExpansionPart():
         case ProcessSubstitutionPart():
         case BraceExpansionPart():
