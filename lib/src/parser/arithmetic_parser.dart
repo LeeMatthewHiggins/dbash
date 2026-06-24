@@ -97,7 +97,11 @@ num parseArithNumber(String s) {
     return _jsParseInt(numStr, base);
   }
   if (s.startsWith('0x') || s.startsWith('0X')) {
-    return _jsParseInt(s.substring(2), 16);
+    // In a `0x`/`0X` literal, hex digits are case-insensitive (`0xFF` == `0xff`).
+    // `_digitValue` maps uppercase `A-Z` to 36-61 to honour bash `base#num`
+    // semantics, so lowercase the hex body here to keep `A-F` in the 10-15 range
+    // without disturbing the `base#` path.
+    return _jsParseInt(s.substring(2).toLowerCase(), 16);
   }
   if (s.startsWith('0') && s.length > 1 && _arithDigits.hasMatch(s)) {
     if (_arith89.hasMatch(s)) return double.nan;
@@ -251,7 +255,11 @@ _ArithResult _parseArithLogicalAnd(Parser p, String input, int pos) =>
         (i, c) => _slice(i, c, c + 2) == '&&', (i, c) => '&&');
 
 _ArithResult _parseArithBitwiseOr(Parser p, String input, int pos) =>
-    _binaryLevel(p, input, pos, _parseArithBitwiseXor,
+    _binaryLevel(
+        p,
+        input,
+        pos,
+        _parseArithBitwiseXor,
         (i, c) => _charAt(i, c) == '|' && _charAt(i, c + 1) != '|',
         (i, c) => '|');
 
@@ -260,7 +268,11 @@ _ArithResult _parseArithBitwiseXor(Parser p, String input, int pos) =>
         (i, c) => _charAt(i, c) == '^', (i, c) => '^');
 
 _ArithResult _parseArithBitwiseAnd(Parser p, String input, int pos) =>
-    _binaryLevel(p, input, pos, _parseArithEquality,
+    _binaryLevel(
+        p,
+        input,
+        pos,
+        _parseArithEquality,
         (i, c) => _charAt(i, c) == '&' && _charAt(i, c + 1) != '&',
         (i, c) => '&');
 
@@ -279,7 +291,8 @@ _ArithResult _parseArithRelational(Parser p, String input, int pos) {
       cur += 2;
       if (_isMissingOperand(input, cur)) return _missingOperand(two, cur);
       final right = _parseArithShift(p, input, cur);
-      left = (expr: ArithBinaryNode(two, left.expr, right.expr), pos: right.pos);
+      left =
+          (expr: ArithBinaryNode(two, left.expr, right.expr), pos: right.pos);
       cur = _skipArithWs(input, right.pos);
     } else if (_charAt(input, cur) == '<' || _charAt(input, cur) == '>') {
       final op = input[cur];
@@ -316,7 +329,8 @@ _ArithResult _parseArithMultiplicative(Parser p, String input, int pos) {
       cur++;
       if (_isMissingOperand(input, cur)) return _missingOperand('*', cur);
       final right = _parseArithPower(p, input, cur);
-      left = (expr: ArithBinaryNode('*', left.expr, right.expr), pos: right.pos);
+      left =
+          (expr: ArithBinaryNode('*', left.expr, right.expr), pos: right.pos);
       cur = _skipArithWs(input, right.pos);
     } else if (ch == '/' || ch == '%') {
       cur++;
@@ -657,7 +671,8 @@ _ArithResult _parseArithPrimary(
         pos: cur,
       );
     }
-    if (_charAt(input, cur) == '.' && _arithDigit.hasMatch(_charAt(input, cur + 1))) {
+    if (_charAt(input, cur) == '.' &&
+        _arithDigit.hasMatch(_charAt(input, cur + 1))) {
       throw ArithmeticError(
         '$numStr.${input[cur + 1]}...: syntax error: invalid arithmetic operator',
       );
@@ -820,7 +835,8 @@ _ArithResult _parseArithPrimary(
       }
 
       return (
-        expr: ArithArrayElementNode(name, index: indexExpr, stringKey: stringKey),
+        expr:
+            ArithArrayElementNode(name, index: indexExpr, stringKey: stringKey),
         pos: cur,
       );
     }

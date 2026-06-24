@@ -49,6 +49,21 @@ void main() {
           '16 8 10 35\n');
     });
 
+    test('uppercase 0x/0X hex digits are case-insensitive', () async {
+      // Regression: A-F in a 0x literal must map to 10-15, not the base#num
+      // alphabet's 36-41. (bash: `echo $((0xFF))` => 255)
+      expect(await out(r'echo $((0xFF))'), '255\n');
+      expect(await out(r'echo $((0Xff))'), '255\n');
+      expect(await out(r'echo $((0xDEADBEEF))'), '3735928559\n');
+      expect(await out(r'echo $((0xAbCdEf))'), '11259375\n');
+    });
+
+    test('uppercase 0x literal in a variable evaluates cleanly', () async {
+      final r = await Bash().exec(r'h=0xFF; echo $((h + 1))');
+      expect(r.exitCode, 0);
+      expect(r.stdout, '256\n');
+    });
+
     test('a digit too great for its base is rejected', () async {
       for (final script in [
         r'echo $((3#13))',
