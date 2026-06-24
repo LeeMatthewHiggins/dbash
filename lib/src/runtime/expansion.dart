@@ -47,18 +47,34 @@ abstract class ExpansionHost {
 /// stdout (with trailing newlines already stripped).
 typedef CommandSubstitutionRunner = Future<String> Function(ScriptNode body);
 
+/// Evaluates an arithmetic expression to an integer.
+typedef ArithmeticEvaluator = int Function(ArithmeticExpressionNode expr);
+
 /// Expands [WordNode]s into argument fields.
 class Expander {
-  /// Creates an expander backed by [host]. [commandSubstitution], when
-  /// provided, runs `$(...)` / `` `...` `` bodies; without it, encountering one
-  /// throws [UnimplementedError].
-  Expander(this.host, {CommandSubstitutionRunner? commandSubstitution})
-      : _runSub = commandSubstitution;
+  /// Creates an expander backed by [host]. [commandSubstitution] runs
+  /// `$(...)` / `` `...` `` bodies and [arithmetic] evaluates `$((...))`;
+  /// without them, encountering those forms throws [UnimplementedError].
+  Expander(
+    this.host, {
+    CommandSubstitutionRunner? commandSubstitution,
+    ArithmeticEvaluator? arithmetic,
+  })  : _runSub = commandSubstitution,
+        _arith = arithmetic;
 
   /// The shell state.
   final ExpansionHost host;
 
   final CommandSubstitutionRunner? _runSub;
+  final ArithmeticEvaluator? _arith;
+
+  int _evalArith(ArithmeticExpressionNode expr) {
+    final f = _arith;
+    if (f == null) {
+      throw UnimplementedError('arithmetic evaluation requires an interpreter');
+    }
+    return f(expr);
+  }
 
   static final RegExp _ifsWs = RegExp(r'[ \t\n]+');
 
@@ -241,6 +257,7 @@ class Expander {
         case CommandSubstitutionPart():
           appendSplit(await _commandSubstitution(part.body));
         case ArithmeticExpansionPart():
+          appendSplit(_evalArith(part.expression).toString());
         case ProcessSubstitutionPart():
         case BraceExpansionPart():
           throw UnimplementedError(
@@ -270,9 +287,7 @@ class Expander {
         case CommandSubstitutionPart():
           sb.write(await _commandSubstitution(part.body));
         case ArithmeticExpansionPart():
-          throw UnimplementedError(
-            'runtime expansion of ${part.type} is not in the MVP yet',
-          );
+          sb.write(_evalArith(part.expression).toString());
         case ProcessSubstitutionPart():
         case BraceExpansionPart():
         case TildeExpansionPart():
@@ -335,11 +350,31 @@ class Expander {
         return cond ? await _expandOpWord(op.word) : '';
       case LengthOp():
         return (raw ?? '').length.toString();
+      case SubstringOp():
+        return _substring(raw ?? '', op);
       default:
         throw UnimplementedError(
           'parameter operation ${op.type} is not in the MVP yet',
         );
     }
+  }
+
+  String _substring(String s, SubstringOp op) {
+    var off = _evalArith(op.offset);
+    if (off < 0) off = s.length + off;
+    if (off < 0) off = 0;
+    if (off > s.length) off = s.length;
+    if (op.length == null) return s.substring(off);
+    final lenVal = _evalArith(op.length!);
+    int end;
+    if (lenVal < 0) {
+      end = s.length + lenVal;
+    } else {
+      end = off + lenVal;
+    }
+    if (end < off) end = off;
+    if (end > s.length) end = s.length;
+    return s.substring(off, end);
   }
 
   Future<String> _expandOpWord(WordNode word) async =>
@@ -368,6 +403,7 @@ class Expander {
         case CommandSubstitutionPart():
           sb.write(await _commandSubstitution(part.body));
         case ArithmeticExpansionPart():
+          sb.write(_evalArith(part.expression).toString());
         case ProcessSubstitutionPart():
         case BraceExpansionPart():
           throw UnimplementedError(
