@@ -12,6 +12,7 @@ import 'package:dbash/src/ast/ast.dart';
 import 'package:dbash/src/fs/file_system.dart';
 import 'package:dbash/src/fs/path_utils.dart' as paths;
 import 'package:dbash/src/parser/parser.dart';
+import 'package:dbash/src/runtime/arithmetic.dart';
 import 'package:dbash/src/runtime/command.dart';
 import 'package:dbash/src/runtime/expansion.dart';
 
@@ -59,7 +60,12 @@ class Interpreter {
     required this.state,
     required this.commands,
   }) {
-    _expander = Expander(state, commandSubstitution: _runCommandSubstitution);
+    _arith = ArithEvaluator(getVar: state.getVar, setVar: state.setVar);
+    _expander = Expander(
+      state,
+      commandSubstitution: _runCommandSubstitution,
+      arithmetic: _arith.evaluate,
+    );
   }
 
   /// The virtual filesystem.
@@ -72,6 +78,7 @@ class Interpreter {
   final CommandRegistry commands;
 
   late final Expander _expander;
+  late final ArithEvaluator _arith;
   final StringBuffer _stderr = StringBuffer();
   int _cmdSubsRun = 0;
 
@@ -118,6 +125,10 @@ class Interpreter {
       _stderr.write('dbash: ${e.message}\n');
       state.lastExitCode = e.exitCode;
       return ExecResult(stdout: stdout, exitCode: e.exitCode);
+    } on ArithmeticError catch (e) {
+      _stderr.write('dbash: ${e.message}\n');
+      state.lastExitCode = 1;
+      return ExecResult(stdout: stdout, exitCode: 1);
     }
     return ExecResult(stdout: stdout, exitCode: state.lastExitCode);
   }
@@ -156,6 +167,12 @@ class Interpreter {
       case UntilNode():
         _rejectRedirections(node.redirections, node.type);
         return _execWhileUntil(node.condition, node.body, until: true);
+      case ArithmeticCommandNode():
+        _rejectRedirections(node.redirections, node.type);
+        return _execArithmeticCommand(node);
+      case CStyleForNode():
+        _rejectRedirections(node.redirections, node.type);
+        return _execCStyleFor(node);
       default:
         throw UnimplementedError(
           'execution of ${node.type} is not in the MVP yet',
@@ -296,6 +313,33 @@ class Interpreter {
     for (final v in values) {
       state.env[node.variable] = v;
       stdout += await _runStatements(node.body);
+    }
+    return ExecResult(stdout: stdout, exitCode: state.lastExitCode);
+  }
+
+  Future<ExecResult> _execArithmeticCommand(ArithmeticCommandNode node) async {
+    // `(( expr ))`: success (exit 0) when the result is non-zero, else 1.
+    // An ArithmeticError (e.g. division by zero) propagates to the statement
+    // chokepoint, which reports it and sets exit 1.
+    final value = _arith.evaluate(node.expression);
+    state.lastExitCode = value != 0 ? 0 : 1;
+    return ExecResult(exitCode: state.lastExitCode);
+  }
+
+  Future<ExecResult> _execCStyleFor(CStyleForNode node) async {
+    var stdout = '';
+    if (node.init != null) _arith.evaluate(node.init!);
+    // bash: a for loop's status is that of the last body command executed, or
+    // success when zero iterations run. Reset so a prior failure doesn't leak.
+    state.lastExitCode = 0;
+    var guard = 0;
+    while (guard++ < 1000000) {
+      // An empty condition is treated as true (infinite loop until break).
+      final cond =
+          node.condition == null ? 1 : _arith.evaluate(node.condition!);
+      if (cond == 0) break;
+      stdout += await _runStatements(node.body);
+      if (node.update != null) _arith.evaluate(node.update!);
     }
     return ExecResult(stdout: stdout, exitCode: state.lastExitCode);
   }

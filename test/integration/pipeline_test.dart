@@ -127,7 +127,6 @@ void main() {
     });
 
     test('unported features throw at their boundary, not silently', () {
-      expect(() => parse('(( 1 + 1 ))'), throwsUnimplementedError);
       expect(() => parse('[[ -f x ]]'), throwsUnimplementedError);
     });
 

@@ -215,30 +215,30 @@ void main() {
     });
   });
 
+  group('arithmetic now parses', () {
+    test(r'$((...)) parses into an ArithmeticExpansionPart', () {
+      final part = cmd(r'echo $((1 + 2))').args.single.parts.single;
+      expect(part, isA<ArithmeticExpansionPart>());
+    });
+
+    test('(( ... )) parses into an ArithmeticCommandNode', () {
+      final node = parse('(( 1 + 2 ))')
+          .statements.single.pipelines.single.commands.single;
+      expect(node, isA<ArithmeticCommandNode>());
+    });
+
+    test('C-style for parses into a CStyleForNode', () {
+      final node = parse('for ((i=0; i<3; i++)); do echo x; done')
+          .statements.single.pipelines.single.commands.single;
+      expect(node, isA<CStyleForNode>());
+    });
+  });
+
   // These stubbed sub-parsers are not yet ported. The assertions make the
   // boundaries visible in the suite so the gaps cannot regress silently.
   group('not-yet-ported boundaries throw UnimplementedError', () {
-    test(r'arithmetic expansion $((...))', () {
-      expect(() => parse(r'echo $((1 + 2))'), throwsUnimplementedError);
-    });
-
-    test(r'old-style arithmetic $[...]', () {
-      expect(() => parse(r'echo $[1 + 2]'), throwsUnimplementedError);
-    });
-
-    test('arithmetic command (( ... ))', () {
-      expect(() => parse('(( 1 + 2 ))'), throwsUnimplementedError);
-    });
-
     test('conditional command [[ ... ]]', () {
       expect(() => parse('[[ x ]]'), throwsUnimplementedError);
-    });
-
-    test('C-style for uses arithmetic and throws', () {
-      expect(
-        () => parse('for ((i=0; i<3; i++)); do echo x; done'),
-        throwsUnimplementedError,
-      );
     });
   });
 }

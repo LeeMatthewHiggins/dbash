@@ -77,7 +77,6 @@ Future<void> _filesystemDemo() async {
 
 void _boundariesDemo() {
   const notYetPorted = [
-    r'echo $((1 + 2))', // arithmetic expansion
     '[[ -n x ]]', // conditional command
   ];
   for (final src in notYetPorted) {

@@ -11,6 +11,18 @@
 // ignore_for_file: avoid_positional_boolean_parameters
 library;
 
+/// Error raised while parsing or evaluating an arithmetic expression.
+class ArithmeticError implements Exception {
+  /// Creates an arithmetic error with [message].
+  ArithmeticError(this.message);
+
+  /// The error message (bash-style).
+  final String message;
+
+  @override
+  String toString() => message;
+}
+
 /// Base class for all AST nodes.
 abstract class AstNode {
   /// The discriminant string (matches upstream node `type`).
