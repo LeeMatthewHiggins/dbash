@@ -6,8 +6,6 @@
 // ignore_for_file: lines_longer_than_80_chars, use_string_buffers
 part of 'parser.dart';
 
-const int _maxSafeInteger = 9007199254740991;
-
 const List<String> _arithAssignOps = [
   '=',
   '+=',
@@ -71,7 +69,8 @@ int _digitForBase(String c, int base) {
 }
 
 /// JS-`parseInt`-style prefix parse: consume valid digits for [radix], stop at
-/// the first invalid one, clamp to [_maxSafeInteger], NaN if no digits.
+/// the first invalid one, NaN if no digits. Accumulates in a native 64-bit
+/// [int] (overflow wraps, matching bash's 64-bit arithmetic) — no 2^53 clamp.
 num _jsParseInt(String s, int radix) {
   var i = 0;
   while (i < s.length && _arithWs.hasMatch(s[i])) {
@@ -88,7 +87,6 @@ num _jsParseInt(String s, int radix) {
     final d = _digitForBase(s[i], radix);
     if (d < 0 || d >= radix) break;
     result = result * radix + d;
-    if (result > _maxSafeInteger) return _maxSafeInteger * sign;
     i++;
   }
   if (i == start) return double.nan;
