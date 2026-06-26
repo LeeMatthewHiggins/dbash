@@ -471,6 +471,13 @@ class Interpreter {
       final cmp = l.compareTo(r);
       return op == '<' ? cmp < 0 : cmp > 0;
     }
+    if (op == '-nt' || op == '-ot' || op == '-ef') {
+      return _evalBinaryFileTest(
+        op,
+        await _str(node.left),
+        await _str(node.right),
+      );
+    }
     // Arithmetic comparisons.
     final l = _arithFromString(await _str(node.left));
     final r = _arithFromString(await _str(node.right));
@@ -488,8 +495,35 @@ class Interpreter {
       case '-ge':
         return l >= r;
       default:
-        // -nt / -ot / -ef file comparisons are not supported yet.
-        throw UnimplementedError('conditional operator $op is not supported');
+        throw ArithmeticError('conditional operator $op is not supported');
+    }
+  }
+
+  /// Compares two files by modification time (`-nt`/`-ot`) or identity (`-ef`).
+  ///
+  /// A missing file yields false rather than an error, mirroring bash and the
+  /// upstream just-bash behavior. `-ef` compares canonical paths.
+  Future<bool> _evalBinaryFileTest(
+    String op,
+    String left,
+    String right,
+  ) async {
+    final leftPath = paths.resolvePath(state.cwd, left);
+    final rightPath = paths.resolvePath(state.cwd, right);
+    try {
+      if (op == '-ef') {
+        if (!await fs.exists(leftPath) || !await fs.exists(rightPath)) {
+          return false;
+        }
+        return await fs.realpath(leftPath) == await fs.realpath(rightPath);
+      }
+      final leftMtime = (await fs.stat(leftPath)).mtime;
+      final rightMtime = (await fs.stat(rightPath)).mtime;
+      return op == '-nt'
+          ? leftMtime.isAfter(rightMtime)
+          : leftMtime.isBefore(rightMtime);
+    } on Object {
+      return false;
     }
   }
 

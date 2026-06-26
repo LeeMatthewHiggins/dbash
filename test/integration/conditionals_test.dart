@@ -76,6 +76,43 @@ void main() {
     });
   });
 
+  group('[[ ]] binary file comparisons (-nt / -ot / -ef)', () {
+    Future<Bash> twoFiles() async {
+      final fs = InMemoryFs();
+      await fs.writeFile('/old', 'a');
+      await fs.utimes('/old', DateTime(2020), DateTime(2020));
+      await fs.writeFile('/new', 'b');
+      await fs.utimes('/new', DateTime(2021), DateTime(2021));
+      await fs.symlink('/old', '/link-to-old');
+      return Bash(fileSystem: fs);
+    }
+
+    test('-nt is true when the left file is newer', () async {
+      expect((await (await twoFiles()).exec('[[ /new -nt /old ]]')).exitCode, 0);
+      expect((await (await twoFiles()).exec('[[ /old -nt /new ]]')).exitCode, 1);
+    });
+
+    test('-ot is true when the left file is older', () async {
+      expect((await (await twoFiles()).exec('[[ /old -ot /new ]]')).exitCode, 0);
+      expect((await (await twoFiles()).exec('[[ /new -ot /old ]]')).exitCode, 1);
+    });
+
+    test('-ef is true for paths resolving to the same file', () async {
+      final bash = await twoFiles();
+      expect((await bash.exec('[[ /old -ef /link-to-old ]]')).exitCode, 0);
+      expect((await bash.exec('[[ /old -ef /new ]]')).exitCode, 1);
+    });
+
+    test('a missing operand yields false, never a crash', () async {
+      final bash = await twoFiles();
+      for (final op in ['-nt', '-ot', '-ef']) {
+        final r = await bash.exec('[[ /old $op /missing ]]');
+        expect(r.exitCode, 1, reason: '$op with a missing file');
+        expect(r.stderr, '', reason: '$op must not error');
+      }
+    });
+  });
+
   group('[[ ]] regex (=~)', () {
     test('matches an ERE', () async {
       expect(await code(r'[[ abc123 =~ ^[a-z]+[0-9]+$ ]]'), 0);
