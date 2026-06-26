@@ -603,6 +603,7 @@ class Interpreter {
     final subject = await _expander.expandToString(node.word);
     var stdout = '';
     var matched = false;
+    var ranCommand = false;
     var fallThrough = false;
 
     for (final item in node.items) {
@@ -617,6 +618,7 @@ class Interpreter {
       }
       if (hit) {
         matched = true;
+        if (item.body.isNotEmpty) ranCommand = true;
         stdout += await _runStatements(item.body);
         if (item.terminator == ';&') {
           fallThrough = true; // run the next clause's body unconditionally
@@ -629,7 +631,9 @@ class Interpreter {
       fallThrough = false;
     }
 
-    if (!matched) state.lastExitCode = 0;
+    // Bash: the status is that of the last command run, or 0 if a matching
+    // clause ran no command at all (and 0 when nothing matched).
+    if (!matched || !ranCommand) state.lastExitCode = 0;
     return ExecResult(stdout: stdout, exitCode: state.lastExitCode);
   }
 

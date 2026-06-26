@@ -215,5 +215,16 @@ void main() {
       const s = 'case abc in a*) echo p1;;& *c) echo p2;; esac';
       expect(await out(s), 'p1\np2\n');
     });
+
+    test('an empty matched clause resets status to 0', () async {
+      expect(await code('false; case x in x) ;; esac'), 0);
+      expect(await code('false; case x in y) echo no;; esac'), 0);
+    });
+
+    test('an empty clause does not mask an earlier command status', () async {
+      // The matched ;& clause runs `false`, then falls through to an empty
+      // body; bash keeps the last executed command status (1), not 0.
+      expect(await code('case x in x) false;& *) ;; esac'), 1);
+    });
   });
 }
