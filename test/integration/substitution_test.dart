@@ -3,6 +3,12 @@ import 'package:dbash/dbash.dart';
 import 'package:test/test.dart';
 
 void main() {
+  Bash bashWithTrue() => Bash(
+        customCommands: [
+          defineCommand('true', (args, ctx) => const ExecResult()),
+        ],
+      );
+
   group('word splitting of unquoted substitution (review: kumar)', () {
     test('leading/trailing IFS whitespace produces no empty fields', () async {
       final r = await Bash().exec(
@@ -37,30 +43,87 @@ void main() {
       expect((await Bash().exec(r'echo `echo \$HOME`')).stdout, '/home/user\n');
     });
 
+    test(r'\\ escape inside backticks preserves a literal backslash', () async {
+      final r = await Bash().exec(r"echo `printf '\\'`");
+      expect(r.stdout, '\\\n');
+    });
+
+    test(r'\` escape inside backticks preserves a literal backtick', () async {
+      final r = await Bash().exec(r"echo `echo '\`'`");
+      expect(r.stdout, '`\n');
+    });
+
+    test('backslash-newline inside backticks is elided', () async {
+      final r = await Bash().exec('echo `echo a\\\nb`');
+      expect(r.stdout, 'ab\n');
+    });
+
     test(r'\" escape is special only inside double quotes', () async {
       final r = await Bash().exec(r'echo "`echo \"hi\"`"');
       expect(r.stdout, 'hi\n');
+    });
+
+    test(r'\" escape outside double quotes remains a quoted literal', () async {
+      final r = await Bash().exec(r'echo `echo \"hi\"`');
+      expect(r.stdout, '"hi"\n');
     });
   });
 
   group('error boundaries (review: data)', () {
     test(r'unterminated $( throws ParseException', () {
-      expect(() => Bash().exec(r'echo $(echo hi'),
-          throwsA(isA<ParseException>()));
+      expect(
+        Bash().exec(r'echo $(echo hi'),
+        throwsA(
+          isA<ParseException>().having(
+            (e) => e.rawMessage,
+            'message',
+            contains("unexpected EOF while looking for matching `)'"),
+          ),
+        ),
+      );
     });
 
     test('unterminated backtick throws ParseException', () {
-      expect(() => Bash().exec('echo `echo hi'),
-          throwsA(isA<ParseException>()));
+      expect(
+        Bash().exec('echo `echo hi'),
+        throwsA(
+          isA<ParseException>().having(
+            (e) => e.rawMessage,
+            'message',
+            contains("unexpected EOF while looking for matching ``'"),
+          ),
+        ),
+      );
     });
   });
 
   group('parser-level disambiguation (review: data)', () {
     test(r'$(( with inner subshell parses as command substitution', () {
       final cmd = parse(r'echo $((echo a); (echo b))')
-          .statements.single.pipelines.single.commands.single
-          as SimpleCommandNode;
+          .statements
+          .single
+          .pipelines
+          .single
+          .commands
+          .single as SimpleCommandNode;
       expect(cmd.args.single.parts.single, isA<CommandSubstitutionPart>());
+    });
+
+    test(r'$() scanner ignores closing parens inside heredoc bodies', () {
+      final cmd = parse(
+        'echo \$(cat <<EOF\n'
+        ')\n'
+        'EOF\n'
+        ')',
+      ).statements.single.pipelines.single.commands.single as SimpleCommandNode;
+
+      final part = cmd.args.single.parts.single as CommandSubstitutionPart;
+      final inner = part.body.statements.single.pipelines.single.commands.single
+          as SimpleCommandNode;
+      final heredoc = inner.redirections.single.target as HereDocNode;
+
+      expect(heredoc.content.parts.single, isA<LiteralPart>());
+      expect((heredoc.content.parts.single as LiteralPart).value, ')\n');
     });
   });
 
@@ -68,7 +131,26 @@ void main() {
     test('stderr from a substitution propagates', () async {
       final r = await Bash().exec(r'x=$(nosuchcmd); echo after');
       expect(r.stdout, 'after\n');
-      expect(r.stderr, contains('command not found'));
+      expect(r.stderr, 'dbash: nosuchcmd: command not found\n');
+    });
+
+    test('internal newlines from unquoted substitution split fields', () async {
+      final r = await Bash().exec(
+        r'''for w in $(printf 'a\nb\nc'); do echo "[$w]"; done''',
+      );
+      expect(r.stdout, '[a]\n[b]\n[c]\n');
+    });
+
+    test('empty quoted substitution keeps the surrounding field', () async {
+      final r = await bashWithTrue().exec(r'echo "[$(true)]"');
+      expect(r.stdout, '[]\n');
+    });
+
+    test('empty unquoted substitution produces no loop iterations', () async {
+      final r = await bashWithTrue().exec(
+        r'n=0; for w in $(true); do n=1; done; echo $n',
+      );
+      expect(r.stdout, '0\n');
     });
 
     test('only trailing newlines are stripped — trailing spaces stay',

@@ -221,6 +221,11 @@ void main() {
       expect(part, isA<ArithmeticExpansionPart>());
     });
 
+    test(r'$((...)) with nested parens stays arithmetic, not subshell', () {
+      final part = cmd(r'echo $(((1 + 2) * 3))').args.single.parts.single;
+      expect(part, isA<ArithmeticExpansionPart>());
+    });
+
     test('(( ... )) parses into an ArithmeticCommandNode', () {
       final node = parse('(( 1 + 2 ))')
           .statements.single.pipelines.single.commands.single;
