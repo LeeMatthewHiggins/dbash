@@ -15,6 +15,7 @@ import 'package:dbash/src/parser/parser.dart';
 import 'package:dbash/src/runtime/arithmetic.dart';
 import 'package:dbash/src/runtime/command.dart';
 import 'package:dbash/src/runtime/expansion.dart';
+import 'package:dbash/src/runtime/pattern.dart';
 
 /// Mutable shell state for one execution.
 class ShellState implements ExpansionHost {
@@ -173,6 +174,12 @@ class Interpreter {
       case CStyleForNode():
         _rejectRedirections(node.redirections, node.type);
         return _execCStyleFor(node);
+      case ConditionalCommandNode():
+        _rejectRedirections(node.redirections, node.type);
+        return _execConditionalCommand(node);
+      case CaseNode():
+        _rejectRedirections(node.redirections, node.type);
+        return _execCase(node);
       default:
         throw UnimplementedError(
           'execution of ${node.type} is not in the MVP yet',
@@ -351,6 +358,244 @@ class Interpreter {
       state.lastExitCode = 1;
       return ExecResult(stdout: stdout, exitCode: 1);
     }
+    return ExecResult(stdout: stdout, exitCode: state.lastExitCode);
+  }
+
+  // --- conditionals: [[ ]] and case ----------------------------------------
+
+  Future<ExecResult> _execConditionalCommand(
+    ConditionalCommandNode node,
+  ) async {
+    final ok = await _evalCond(node.expression);
+    state.lastExitCode = ok ? 0 : 1;
+    return ExecResult(exitCode: state.lastExitCode);
+  }
+
+  Future<bool> _evalCond(ConditionalExpressionNode node) async {
+    switch (node) {
+      case CondGroupNode():
+        return _evalCond(node.expression);
+      case CondNotNode():
+        return !await _evalCond(node.operand);
+      case CondAndNode():
+        return await _evalCond(node.left) && await _evalCond(node.right);
+      case CondOrNode():
+        return await _evalCond(node.left) || await _evalCond(node.right);
+      case CondWordNode():
+        return (await _expander.expandToString(node.word)).isNotEmpty;
+      case CondUnaryNode():
+        return _evalCondUnary(node.operator, await _str(node.operand));
+      case CondBinaryNode():
+        return _evalCondBinary(node);
+    }
+  }
+
+  Future<String> _str(WordNode w) => _expander.expandToString(w);
+
+  Future<bool> _evalCondUnary(String op, String operand) async {
+    switch (op) {
+      case '-z':
+        return operand.isEmpty;
+      case '-n':
+        return operand.isNotEmpty;
+      case '-v':
+        return state.getVar(operand) != null;
+      case '-t':
+      case '-o':
+        return false; // no terminal / shell options not tracked yet
+    }
+    // File tests.
+    final path = paths.resolvePath(state.cwd, operand);
+    switch (op) {
+      case '-e':
+      case '-a':
+        return fs.exists(path);
+      case '-f':
+        return _statBool(path, (s) => s.isFile);
+      case '-d':
+        return _statBool(path, (s) => s.isDirectory);
+      case '-s':
+        return _statBool(path, (s) => s.size > 0);
+      case '-r':
+      case '-w':
+        return fs.exists(path);
+      case '-x':
+        return _statBool(
+          path,
+          (s) => s.isDirectory || (s.mode & 0x49) != 0, // any execute bit
+        );
+      case '-h':
+      case '-L':
+        return _lstatBool(path, (s) => s.isSymbolicLink);
+      default:
+        return false;
+    }
+  }
+
+  Future<bool> _statBool(String path, bool Function(FsStat) test) async {
+    try {
+      return test(await fs.stat(path));
+    } on Object {
+      return false;
+    }
+  }
+
+  Future<bool> _lstatBool(String path, bool Function(FsStat) test) async {
+    try {
+      return test(await fs.lstat(path));
+    } on Object {
+      return false;
+    }
+  }
+
+  Future<bool> _evalCondBinary(CondBinaryNode node) async {
+    final op = node.operator;
+    if (op == '=~') {
+      final subject = await _str(node.left);
+      final source = await _regexFromWord(node.right);
+      try {
+        return RegExp(source).hasMatch(subject);
+      } on FormatException {
+        throw ArithmeticError('invalid regular expression');
+      }
+    }
+    if (op == '==' || op == '=' || op == '!=') {
+      final left = await _str(node.left);
+      final pattern = await _patternFromWord(node.right);
+      final matched = globMatch(pattern, left);
+      return op == '!=' ? !matched : matched;
+    }
+    if (op == '<' || op == '>') {
+      final l = await _str(node.left);
+      final r = await _str(node.right);
+      final cmp = l.compareTo(r);
+      return op == '<' ? cmp < 0 : cmp > 0;
+    }
+    // Arithmetic comparisons.
+    final l = _arithFromString(await _str(node.left));
+    final r = _arithFromString(await _str(node.right));
+    switch (op) {
+      case '-eq':
+        return l == r;
+      case '-ne':
+        return l != r;
+      case '-lt':
+        return l < r;
+      case '-le':
+        return l <= r;
+      case '-gt':
+        return l > r;
+      case '-ge':
+        return l >= r;
+      default:
+        // -nt / -ot / -ef file comparisons are not supported yet.
+        throw UnimplementedError('conditional operator $op is not supported');
+    }
+  }
+
+  int _arithFromString(String s) {
+    final trimmed = s.trim();
+    if (trimmed.isEmpty) return 0;
+    return _arith.evaluate(Parser().parseArithmeticExpression(trimmed));
+  }
+
+  /// Build a glob pattern string from a word: literal/glob parts keep their
+  /// metacharacters, while quoted and escaped parts are matched literally.
+  Future<String> _patternFromWord(WordNode word) async {
+    final sb = StringBuffer();
+    for (final part in word.parts) {
+      switch (part) {
+        case LiteralPart():
+          sb.write(part.value);
+        case GlobPart():
+          sb.write(part.pattern);
+        case EscapedPart():
+          sb.write(_globEscape(part.value));
+        case SingleQuotedPart():
+          sb.write(_globEscape(part.value));
+        case DoubleQuotedPart():
+          final inner = await _expander.expandToString(WordNode([part]));
+          sb.write(_globEscape(inner));
+        case ParameterExpansionPart():
+        case CommandSubstitutionPart():
+        case ArithmeticExpansionPart():
+          sb.write(await _expander.expandToString(WordNode([part])));
+        case TildeExpansionPart():
+        case BraceExpansionPart():
+        case ProcessSubstitutionPart():
+          sb.write(await _expander.expandToString(WordNode([part])));
+      }
+    }
+    return sb.toString();
+  }
+
+  static String _globEscape(String s) {
+    final sb = StringBuffer();
+    for (final ch in s.split('')) {
+      if (ch == '*' || ch == '?' || ch == '[' || ch == ']' || ch == r'\') {
+        sb.write(r'\');
+      }
+      sb.write(ch);
+    }
+    return sb.toString();
+  }
+
+  /// Build an ERE source string for `=~`: escaped/quoted parts are literal,
+  /// literal/expansion parts are active regex.
+  Future<String> _regexFromWord(WordNode word) async {
+    final sb = StringBuffer();
+    for (final part in word.parts) {
+      switch (part) {
+        case LiteralPart():
+          sb.write(part.value);
+        case GlobPart():
+          sb.write(part.pattern);
+        case EscapedPart():
+          sb.write(RegExp.escape(part.value));
+        case SingleQuotedPart():
+          sb.write(RegExp.escape(part.value));
+        case DoubleQuotedPart():
+          sb.write(
+            RegExp.escape(await _expander.expandToString(WordNode([part]))),
+          );
+        default:
+          sb.write(await _expander.expandToString(WordNode([part])));
+      }
+    }
+    return sb.toString();
+  }
+
+  Future<ExecResult> _execCase(CaseNode node) async {
+    final subject = await _expander.expandToString(node.word);
+    var stdout = '';
+    var matched = false;
+    var fallThrough = false;
+
+    for (final item in node.items) {
+      var hit = fallThrough;
+      if (!hit) {
+        for (final pat in item.patterns) {
+          if (globMatch(await _patternFromWord(pat), subject)) {
+            hit = true;
+            break;
+          }
+        }
+      }
+      if (hit) {
+        matched = true;
+        stdout += await _runStatements(item.body);
+        if (item.terminator == ';&') {
+          fallThrough = true; // run the next clause's body unconditionally
+          continue;
+        }
+        fallThrough = false;
+        if (item.terminator == ';;&') continue; // keep testing later patterns
+        break; // ';;'
+      }
+      fallThrough = false;
+    }
+
+    if (!matched) state.lastExitCode = 0;
     return ExecResult(stdout: stdout, exitCode: state.lastExitCode);
   }
 

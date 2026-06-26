@@ -126,10 +126,6 @@ void main() {
       expect(() => parse('if true; then'), throwsA(isA<ParseException>()));
     });
 
-    test('unported features throw at their boundary, not silently', () {
-      expect(() => parse('[[ -f x ]]'), throwsUnimplementedError);
-    });
-
     test('missing file surfaces as FsException', () {
       final fs = InMemoryFs();
       expect(() => fs.readFile('/nope'), throwsA(isA<FsException>()));
