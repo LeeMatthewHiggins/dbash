@@ -328,18 +328,28 @@ class Interpreter {
 
   Future<ExecResult> _execCStyleFor(CStyleForNode node) async {
     var stdout = '';
-    if (node.init != null) _arith.evaluate(node.init!);
-    // bash: a for loop's status is that of the last body command executed, or
-    // success when zero iterations run. Reset so a prior failure doesn't leak.
-    state.lastExitCode = 0;
-    var guard = 0;
-    while (guard++ < 1000000) {
-      // An empty condition is treated as true (infinite loop until break).
-      final cond =
-          node.condition == null ? 1 : _arith.evaluate(node.condition!);
-      if (cond == 0) break;
-      stdout += await _runStatements(node.body);
-      if (node.update != null) _arith.evaluate(node.update!);
+    // Contain arithmetic errors from init/cond/update here (rather than letting
+    // them unwind to the statement chokepoint) so output already emitted by
+    // earlier iterations is preserved, matching bash. Body-statement errors are
+    // already contained by their own _execStatement.
+    try {
+      if (node.init != null) _arith.evaluate(node.init!);
+      // bash: a for loop's status is that of its last body command, or success
+      // for zero iterations. Reset so a prior failure doesn't leak through.
+      state.lastExitCode = 0;
+      var guard = 0;
+      while (guard++ < 1000000) {
+        // An empty condition is treated as true (infinite loop until break).
+        final cond =
+            node.condition == null ? 1 : _arith.evaluate(node.condition!);
+        if (cond == 0) break;
+        stdout += await _runStatements(node.body);
+        if (node.update != null) _arith.evaluate(node.update!);
+      }
+    } on ArithmeticError catch (e) {
+      _stderr.write('dbash: ${e.message}\n');
+      state.lastExitCode = 1;
+      return ExecResult(stdout: stdout, exitCode: 1);
     }
     return ExecResult(stdout: stdout, exitCode: state.lastExitCode);
   }

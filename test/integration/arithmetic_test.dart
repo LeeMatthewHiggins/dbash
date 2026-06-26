@@ -136,6 +136,38 @@ void main() {
           await Bash().exec('false; for ((i=5; i<3; i++)); do echo x; done');
       expect(r.exitCode, 0);
     });
+
+    test('arithmetic error in update keeps already-emitted output (#11)',
+        () async {
+      final r =
+          await Bash().exec(r'for ((i=0; i<3; i=i/0)); do echo $i; done');
+      expect(r.stdout, '0\n');
+      expect(r.exitCode, 1);
+      expect(r.stderr, contains('division by 0'));
+    });
+
+    test('arithmetic error in init produces no output', () async {
+      final r = await Bash().exec(r'for ((i=1/0; i<3; i++)); do echo $i; done');
+      expect(r.stdout, '');
+      expect(r.exitCode, 1);
+    });
+  });
+
+  group('64-bit integer literals (#11)', () {
+    test('large decimal literals are not clamped to 2^53-1', () async {
+      expect(await out(r'echo $((10000000000000000))'), '10000000000000000\n');
+    });
+
+    test('int64-max hex literal', () async {
+      expect(
+        await out(r'echo $((0x7FFFFFFFFFFFFFFF))'),
+        '9223372036854775807\n',
+      );
+    });
+
+    test('arithmetic on large values', () async {
+      expect(await out(r'echo $((5000000000 * 2))'), '10000000000\n');
+    });
   });
 
   group(r'${var:offset:length} substring', () {
