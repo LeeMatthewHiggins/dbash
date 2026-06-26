@@ -239,11 +239,17 @@ void main() {
     });
   });
 
-  // These stubbed sub-parsers are not yet ported. The assertions make the
-  // boundaries visible in the suite so the gaps cannot regress silently.
-  group('not-yet-ported boundaries throw UnimplementedError', () {
-    test('conditional command [[ ... ]]', () {
-      expect(() => parse('[[ x ]]'), throwsUnimplementedError);
+  group('conditional commands now parse (last parser leaf)', () {
+    test('[[ ... ]] parses into a ConditionalCommandNode', () {
+      final node = parse('[[ -f x ]]')
+          .statements.single.pipelines.single.commands.single;
+      expect(node, isA<ConditionalCommandNode>());
+    });
+
+    test('case parses into a CaseNode', () {
+      final node = parse('case x in a) echo a;; esac')
+          .statements.single.pipelines.single.commands.single;
+      expect(node, isA<CaseNode>());
     });
   });
 }

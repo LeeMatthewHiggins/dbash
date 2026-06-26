@@ -18,8 +18,8 @@ void main() async {
   _header('3. Virtual filesystem — sandboxed, in-memory');
   await _filesystemDemo();
 
-  _header('4. What still throws (unported leaves)');
-  _boundariesDemo();
+  _header('4. Executing scripts — Bash.exec');
+  await _execDemo();
 }
 
 void _lexerDemo() {
@@ -75,17 +75,20 @@ Future<void> _filesystemDemo() async {
   print('readlink /project/LINK -> ${await fs.readlink('/project/LINK')}');
 }
 
-void _boundariesDemo() {
-  const notYetPorted = [
-    '[[ -n x ]]', // conditional command
+Future<void> _execDemo() async {
+  final bash = Bash(files: {'/etc/hosts': '127.0.0.1 localhost\n'});
+  const scripts = [
+    r'name=World; echo "Hello, $name!"',
+    r'echo $((6 * 7)) is the answer',
+    r'for i in 1 2 3; do echo "row $i"; done',
+    'if [[ -f /etc/hosts ]]; then echo "hosts exists"; fi',
+    r'v=2; case $v in 1) echo one;; 2) echo two;; *) echo other;; esac',
+    r'echo "today is $(echo Tuesday)"',
   ];
-  for (final src in notYetPorted) {
-    try {
-      parse(src);
-      print('  $src  -> (unexpectedly parsed)');
-    } on UnimplementedError catch (e) {
-      print('  ${src.padRight(18)} -> throws: ${e.message}');
-    }
+  for (final src in scripts) {
+    final r = await bash.exec(src);
+    print('\$ $src');
+    if (r.stdout.isNotEmpty) print('  ${r.stdout.trimRight()}');
   }
 }
 

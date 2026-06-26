@@ -229,12 +229,16 @@ CaseNode parseCase(Parser p, {bool skipRedirections = false}) {
   return CaseNode(word, items, redirections: redirections);
 }
 
+/// Whether the parser is positioned at an extglob negation pattern `!(...)`.
+bool _isExtglobNegation(Parser p) =>
+    p.check([TokenType.bang]) && p.peek(1).type == TokenType.lparen;
+
 CaseItemNode? _parseCaseItem(Parser p) {
   if (p.check([TokenType.lparen])) p.advance();
 
   final patterns = <WordNode>[];
-  while (p.isWord()) {
-    patterns.add(p.parseWord());
+  while (p.isWord() || _isExtglobNegation(p)) {
+    patterns.add(_parsePatternWord(p));
     if (p.check([TokenType.pipe])) {
       p.advance();
     } else {
