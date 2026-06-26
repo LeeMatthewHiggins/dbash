@@ -16,6 +16,39 @@ import 'package:dbash/src/runtime/arithmetic.dart';
 import 'package:dbash/src/runtime/command.dart';
 import 'package:dbash/src/runtime/expansion.dart';
 
+/// Unwinds a word-expansion failure to the top-level [Interpreter.run] loop.
+///
+/// In bash, an expansion error in a command word, assignment RHS, for-loop
+/// word list, or redirection target (a failed `$(())`/`$[...]` arithmetic, a
+/// `${x:?msg}`, a bad substring, an unsupported expansion, …) aborts the
+/// *entire* enclosing command: the simple command, every compound command it
+/// sits inside, and the rest of that command's `;`/`&&`/`||` list. Execution
+/// then resumes at the next top-level command. We model that by throwing this
+/// from the expansion chokepoint and unwinding through every statement-list and
+/// loop executor up to [Interpreter.run], which reports it and moves on.
+///
+/// [stdout] carries any output already emitted by earlier parts of the aborted
+/// command (prior loop iterations, earlier `&&` pipelines) so it is preserved,
+/// matching bash. Each executor prepends its own accumulated output as the
+/// exception passes through.
+///
+/// Arithmetic errors in `(( ))` and in a C-style for's init/cond/update are
+/// NOT expansion errors — bash treats them as ordinary command failures (exit
+/// 1, the list continues), so those are contained at their executors and never
+/// become a [_CommandAbort].
+class _CommandAbort implements Exception {
+  _CommandAbort(this.message, this.exitCode, this.stdout);
+
+  /// The underlying error message (already stripped of any `dbash:` prefix).
+  final String message;
+
+  /// The exit status bash assigns to the aborted command.
+  final int exitCode;
+
+  /// Output emitted before the abort, accreted as the exception unwinds.
+  String stdout;
+}
+
 /// Mutable shell state for one execution.
 class ShellState implements ExpansionHost {
   /// Creates shell state.
@@ -91,8 +124,18 @@ class Interpreter {
         state.lastExitCode = 2;
         continue;
       }
-      final r = await _execStatement(stmt, '');
-      stdout += r.stdout;
+      // A word-expansion error aborts its whole top-level command but not the
+      // script: report it, adopt bash's exit status, and run the next command.
+      // (dbash flattens `;` and newline into separate top-level statements, so
+      // unlike bash a `;`-joined sibling on the same source line still runs.)
+      try {
+        final r = await _execStatement(stmt, '');
+        stdout += r.stdout;
+      } on _CommandAbort catch (e) {
+        stdout += e.stdout;
+        _stderr.write('dbash: ${e.message}\n');
+        state.lastExitCode = e.exitCode;
+      }
     }
     return ExecResult(
       stdout: stdout,
@@ -105,10 +148,13 @@ class Interpreter {
   Future<ExecResult> _execStatement(StatementNode stmt, String stdin) async {
     var stdout = '';
     var run = true;
-    // Single chokepoint: any ExpansionError raised while expanding argv,
-    // assignment RHS, for-word lists, or redirection targets anywhere beneath
-    // this statement becomes a shell-like stderr + exit code instead of an
-    // uncaught exception escaping Bash.exec.
+    // Single chokepoint: any ExpansionError or arithmetic error raised while
+    // expanding argv, assignment RHS, for-word lists, or redirection targets
+    // anywhere beneath this statement becomes a [_CommandAbort] that unwinds to
+    // the top-level run loop (bash aborts the whole command on an expansion
+    // error). A [_CommandAbort] already raised by a compound command nested in
+    // this statement passes through, gaining the output of any earlier `&&`
+    // pipeline so it is preserved.
     try {
       for (var i = 0; i < stmt.pipelines.length; i++) {
         if (i > 0) {
@@ -121,14 +167,13 @@ class Interpreter {
         final r = await _execPipeline(stmt.pipelines[i], stdin);
         stdout += r.stdout;
       }
+    } on _CommandAbort catch (e) {
+      e.stdout = stdout + e.stdout;
+      rethrow;
     } on ExpansionError catch (e) {
-      _stderr.write('dbash: ${e.message}\n');
-      state.lastExitCode = e.exitCode;
-      return ExecResult(stdout: stdout, exitCode: e.exitCode);
+      throw _CommandAbort(e.message, e.exitCode, stdout);
     } on ArithmeticError catch (e) {
-      _stderr.write('dbash: ${e.message}\n');
-      state.lastExitCode = 1;
-      return ExecResult(stdout: stdout, exitCode: 1);
+      throw _CommandAbort(e.message, 1, stdout);
     }
     return ExecResult(stdout: stdout, exitCode: state.lastExitCode);
   }
@@ -310,28 +355,43 @@ class Interpreter {
         ? state.positionalParams
         : await _expander.expandWords(node.words!);
     var stdout = '';
-    for (final v in values) {
-      state.env[node.variable] = v;
-      stdout += await _runStatements(node.body);
+    try {
+      for (final v in values) {
+        state.env[node.variable] = v;
+        stdout += await _runStatements(node.body);
+      }
+    } on _CommandAbort catch (e) {
+      // A body word-expansion error aborts the loop; keep earlier output.
+      e.stdout = stdout + e.stdout;
+      rethrow;
     }
     return ExecResult(stdout: stdout, exitCode: state.lastExitCode);
   }
 
   Future<ExecResult> _execArithmeticCommand(ArithmeticCommandNode node) async {
     // `(( expr ))`: success (exit 0) when the result is non-zero, else 1.
-    // An ArithmeticError (e.g. division by zero) propagates to the statement
-    // chokepoint, which reports it and sets exit 1.
-    final value = _arith.evaluate(node.expression);
-    state.lastExitCode = value != 0 ? 0 : 1;
+    // An arithmetic error (e.g. division by zero) is a *command failure* in
+    // bash, not a word-expansion error: it sets exit 1 and the enclosing list
+    // continues (`echo a; (( 1/0 )); echo b` still prints `b`). Contain it here
+    // so it never reaches the expansion chokepoint and becomes a _CommandAbort.
+    try {
+      final value = _arith.evaluate(node.expression);
+      state.lastExitCode = value != 0 ? 0 : 1;
+    } on ArithmeticError catch (e) {
+      _stderr.write('dbash: ${e.message}\n');
+      state.lastExitCode = 1;
+    }
     return ExecResult(exitCode: state.lastExitCode);
   }
 
   Future<ExecResult> _execCStyleFor(CStyleForNode node) async {
     var stdout = '';
-    // Contain arithmetic errors from init/cond/update here (rather than letting
-    // them unwind to the statement chokepoint) so output already emitted by
-    // earlier iterations is preserved, matching bash. Body-statement errors are
-    // already contained by their own _execStatement.
+    // Arithmetic errors from init/cond/update are *command failures*: contain
+    // them here (exit 1, the enclosing list continues) while keeping output
+    // already emitted by earlier iterations, matching bash. A body
+    // word-expansion error is different — it aborts the whole loop and its
+    // enclosing command, so let its _CommandAbort propagate, prepending the
+    // output of earlier iterations.
     try {
       if (node.init != null) _arith.evaluate(node.init!);
       // bash: a for loop's status is that of its last body command, or success
@@ -346,6 +406,9 @@ class Interpreter {
         stdout += await _runStatements(node.body);
         if (node.update != null) _arith.evaluate(node.update!);
       }
+    } on _CommandAbort catch (e) {
+      e.stdout = stdout + e.stdout;
+      rethrow;
     } on ArithmeticError catch (e) {
       _stderr.write('dbash: ${e.message}\n');
       state.lastExitCode = 1;
@@ -361,11 +424,18 @@ class Interpreter {
   }) async {
     var stdout = '';
     var guard = 0;
-    while (guard++ < 100000) {
-      await _runStatements(condition);
-      final ok = state.lastExitCode == 0;
-      if (until ? ok : !ok) break;
-      stdout += await _runStatements(body);
+    try {
+      while (guard++ < 100000) {
+        await _runStatements(condition);
+        final ok = state.lastExitCode == 0;
+        if (until ? ok : !ok) break;
+        stdout += await _runStatements(body);
+      }
+    } on _CommandAbort catch (e) {
+      // A condition/body word-expansion error aborts the loop; keep earlier
+      // output.
+      e.stdout = stdout + e.stdout;
+      rethrow;
     }
     return ExecResult(stdout: stdout, exitCode: state.lastExitCode);
   }
@@ -394,9 +464,16 @@ class Interpreter {
 
   Future<String> _runStatements(List<StatementNode> statements) async {
     var stdout = '';
-    for (final s in statements) {
-      final r = await _execStatement(s, '');
-      stdout += r.stdout;
+    try {
+      for (final s in statements) {
+        final r = await _execStatement(s, '');
+        stdout += r.stdout;
+      }
+    } on _CommandAbort catch (e) {
+      // An expansion error in one statement aborts the rest of the list (and
+      // the compound command containing it); keep output already emitted.
+      e.stdout = stdout + e.stdout;
+      rethrow;
     }
     return stdout;
   }

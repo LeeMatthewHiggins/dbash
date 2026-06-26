@@ -139,8 +139,7 @@ void main() {
 
     test('arithmetic error in update keeps already-emitted output (#11)',
         () async {
-      final r =
-          await Bash().exec(r'for ((i=0; i<3; i=i/0)); do echo $i; done');
+      final r = await Bash().exec(r'for ((i=0; i<3; i=i/0)); do echo $i; done');
       expect(r.stdout, '0\n');
       expect(r.exitCode, 1);
       expect(r.stderr, contains('division by 0'));
@@ -198,7 +197,7 @@ void main() {
     });
   });
 
-  group('arithmetic errors are contained', () {
+  group('arithmetic errors are reported, not thrown', () {
     test('division by zero', () async {
       final r = await Bash().exec(r'echo $((1 / 0))');
       expect(r.exitCode, 1);
@@ -207,6 +206,88 @@ void main() {
 
     test('does not throw out of Bash.exec', () async {
       await expectLater(Bash().exec(r'echo $((5 % 0))'), completes);
+    });
+  });
+
+  // bash parity (#13): an arithmetic error in a *word* (`$(())`, `$[...]`) is a
+  // word-expansion error — it aborts the whole enclosing command (the loop /
+  // compound command it sits in), unlike `(( ))` or a C-style for's
+  // init/cond/update arithmetic, which are command failures that let the
+  // enclosing list continue.
+  group(r'$(()) error in a command word aborts the enclosing command (#13)',
+      () {
+    test('aborts a C-style for loop instead of running every iteration',
+        () async {
+      final r = await Bash()
+          .exec(r'for ((i=0;i<3;i++)); do echo $((1/0)); echo $i; done');
+      // bash 5.2: no stdout, the error once, exit 1 — not 0\n1\n2 + 3 errors.
+      expect(r.stdout, '');
+      expect(r.exitCode, 1);
+      expect('division by 0'.allMatches(r.stderr).length, 1);
+    });
+
+    test('keeps output emitted before the failing word', () async {
+      final r = await Bash()
+          .exec(r'for ((i=0;i<3;i++)); do echo $i; echo $((1/0)); done');
+      expect(r.stdout, '0\n');
+      expect(r.exitCode, 1);
+    });
+
+    test('aborts a regular for loop', () async {
+      final r = await Bash().exec(r'for x in a b c; do echo $((1/0)); done');
+      expect(r.stdout, '');
+      expect(r.exitCode, 1);
+    });
+
+    test('aborts a while loop, keeping earlier output', () async {
+      final r = await Bash().exec(
+        r'x=1; while (( x )); do echo hi; echo $((1/0)); x=0; done',
+      );
+      // The body runs once (echo hi) then the word error aborts the loop.
+      expect(r.stdout, 'hi\n');
+      expect(r.exitCode, 1);
+    });
+
+    test('aborts through a nested if + for, keeping earlier output', () async {
+      final r = await Bash().exec(
+        r'if true; then for ((i=0;i<2;i++)); do echo $i; echo $((1/0)); done; '
+        'echo never; fi',
+      );
+      expect(r.stdout, '0\n');
+      expect(r.stderr, contains('division by 0'));
+      expect(r.exitCode, 1);
+    });
+
+    test(r'$[...] form aborts too', () async {
+      final r = await Bash().exec(r'for x in a b; do echo $[1/0]; done');
+      expect(r.stdout, '');
+      expect(r.exitCode, 1);
+    });
+
+    test('the next top-level command still runs', () async {
+      // dbash flattens `;` and newline into separate top-level statements, so
+      // the abort ends the current command and the script continues.
+      final r = await Bash()
+          .exec('for ((i=0;i<2;i++)); do echo \$((1/0)); done\necho after');
+      expect(r.stdout, 'after\n');
+    });
+  });
+
+  group('(( )) and C-style for arithmetic errors are command failures (#13)',
+      () {
+    test('(( )) error does not abort the list', () async {
+      final r = await Bash().exec('echo a\n(( 1/0 ))\necho b');
+      expect(r.stdout, 'a\nb\n');
+      expect(r.stderr, contains('division by 0'));
+      // Last command is `echo b`, so the list's status is its success.
+      expect(r.exitCode, 0);
+    });
+
+    test('for-loop init error does not abort the list', () async {
+      final r = await Bash()
+          .exec('echo a\nfor ((i=1/0;i<2;i++)); do echo \$i; done\necho b');
+      expect(r.stdout, 'a\nb\n');
+      expect(r.exitCode, 0);
     });
   });
 }
