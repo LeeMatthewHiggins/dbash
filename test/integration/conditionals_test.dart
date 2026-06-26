@@ -76,6 +76,44 @@ void main() {
     });
   });
 
+  group('[[ ]] extended glob patterns', () {
+    test('!(...) negates the alternatives', () async {
+      expect(await code('[[ bar == !(bar) ]]'), 1);
+      expect(await code('[[ baz == !(bar) ]]'), 0);
+      expect(await code('[[ baz == !(bar|baz) ]]'), 1);
+      expect(await code('[[ qux == !(bar|baz) ]]'), 0);
+    });
+
+    test('@(...) matches exactly one alternative', () async {
+      expect(await code('[[ foo == @(foo|bar) ]]'), 0);
+      expect(await code('[[ qux == @(foo|bar) ]]'), 1);
+      expect(await code('[[ foobar == foo@(bar|baz) ]]'), 0);
+    });
+
+    test('+(...) *(...) ?(...) repetition', () async {
+      expect(await code('[[ abab == +(ab) ]]'), 0);
+      expect(await code('[[ "" == +(ab) ]]'), 1);
+      expect(await code('[[ "" == *(ab) ]]'), 0);
+      expect(await code('[[ ababab == *(ab) ]]'), 0);
+      expect(await code('[[ abc == ?(ab)c ]]'), 0);
+      expect(await code('[[ ababc == ?(ab)c ]]'), 1);
+    });
+  });
+
+  group('case extended glob patterns', () {
+    test('!(...) negation as a case pattern', () async {
+      const m = 'case baz in !(bar)) echo m;; *) echo d;; esac';
+      const d = 'case bar in !(bar)) echo m;; *) echo d;; esac';
+      expect(await out(m), 'm\n');
+      expect(await out(d), 'd\n');
+    });
+
+    test('@(...) alternation as a case pattern', () async {
+      const s = 'case foo in @(foo|x)) echo y;; *) echo n;; esac';
+      expect(await out(s), 'y\n');
+    });
+  });
+
   group('[[ ]] binary file comparisons (-nt / -ot / -ef)', () {
     Future<Bash> twoFiles() async {
       final fs = InMemoryFs();

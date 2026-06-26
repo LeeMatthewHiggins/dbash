@@ -3,53 +3,165 @@
 ///
 /// Supports `*` (any run, including `/`), `?` (one char), `[...]` character
 /// classes with `!`/`^` negation, `a-z` ranges, and POSIX `[:class:]` names,
-/// and `\x` escaping. Not full extglob.
+/// `\x` escaping, and the extended-glob forms `?(...)`, `*(...)`, `+(...)`,
+/// `@(...)`, and `!(...)` over `|`-separated alternatives.
 library;
+
+const _extglobPrefixes = {'?', '*', '+', '@', '!'};
 
 /// Whether [str] matches the glob [pattern].
 bool globMatch(String pattern, String str) => _match(pattern, 0, str, 0);
 
+/// Whether `p[pi..]` matches the whole of `s[si..]`.
 bool _match(String p, int pi, String s, int si) {
-  var pIdx = pi;
-  var sIdx = si;
-  while (pIdx < p.length) {
-    final pc = p[pIdx];
-    if (pc == '*') {
-      while (pIdx < p.length && p[pIdx] == '*') {
-        pIdx++;
-      }
-      if (pIdx == p.length) return true;
-      for (var k = sIdx; k <= s.length; k++) {
-        if (_match(p, pIdx, s, k)) return true;
-      }
-      return false;
-    } else if (pc == '?') {
-      if (sIdx >= s.length) return false;
-      pIdx++;
-      sIdx++;
-    } else if (pc == '[') {
-      if (sIdx >= s.length) return false;
-      final res = _matchClass(p, pIdx, s[sIdx]);
-      if (res == null) {
-        if (s[sIdx] != '[') return false;
-        pIdx++;
-        sIdx++;
-      } else {
-        if (!res.matched) return false;
-        pIdx = res.nextPi;
-        sIdx++;
-      }
-    } else if (pc == r'\' && pIdx + 1 < p.length) {
-      if (sIdx >= s.length || s[sIdx] != p[pIdx + 1]) return false;
-      pIdx += 2;
-      sIdx++;
-    } else {
-      if (sIdx >= s.length || s[sIdx] != pc) return false;
-      pIdx++;
-      sIdx++;
+  if (pi >= p.length) return si >= s.length;
+  final pc = p[pi];
+
+  if (_extglobPrefixes.contains(pc) &&
+      pi + 1 < p.length &&
+      p[pi + 1] == '(') {
+    final close = _matchingParen(p, pi + 1);
+    if (close != -1) {
+      final alts = _splitAlternatives(p.substring(pi + 2, close));
+      return _matchExtglob(pc, alts, p, close + 1, s, si);
     }
   }
-  return sIdx == s.length;
+
+  if (pc == '*') {
+    if (_match(p, pi + 1, s, si)) return true;
+    return si < s.length && _match(p, pi, s, si + 1);
+  }
+  if (pc == '?') {
+    return si < s.length && _match(p, pi + 1, s, si + 1);
+  }
+  if (pc == '[') {
+    final probe = _matchClass(p, pi, si < s.length ? s[si] : ' ');
+    if (probe == null) {
+      return si < s.length && s[si] == '[' && _match(p, pi + 1, s, si + 1);
+    }
+    if (si >= s.length || !probe.matched) return false;
+    return _match(p, probe.nextPi, s, si + 1);
+  }
+  if (pc == r'\' && pi + 1 < p.length) {
+    return si < s.length && s[si] == p[pi + 1] && _match(p, pi + 2, s, si + 1);
+  }
+  return si < s.length && s[si] == pc && _match(p, pi + 1, s, si + 1);
+}
+
+/// Matches an extended-glob group `op(alts)` followed by `p[restPi..]`.
+bool _matchExtglob(
+  String op,
+  List<String> alts,
+  String p,
+  int restPi,
+  String s,
+  int si,
+) {
+  bool rest(int k) => _match(p, restPi, s, k);
+
+  switch (op) {
+    case '@':
+      return _altEnds(alts, s, si).any(rest);
+    case '?':
+      return rest(si) || _altEnds(alts, s, si).any(rest);
+    case '*':
+      return _starMatch(alts, p, restPi, s, si);
+    case '+':
+      return _altEnds(alts, s, si)
+          .any((k) => k > si && _starMatch(alts, p, restPi, s, k));
+    case '!':
+      for (var k = si; k <= s.length; k++) {
+        final sub = s.substring(si, k);
+        if (!alts.any((a) => _match(a, 0, sub, 0)) && rest(k)) return true;
+      }
+      return false;
+  }
+  return false;
+}
+
+/// End indices `k` such that some alternative matches `s[si..k]` exactly.
+Iterable<int> _altEnds(List<String> alts, String s, int si) sync* {
+  for (final alt in alts) {
+    for (var k = si; k <= s.length; k++) {
+      if (_match(alt, 0, s.substring(si, k), 0)) yield k;
+    }
+  }
+}
+
+/// Zero-or-more repetition of [alts] (`*(...)` / the tail of `+(...)`).
+bool _starMatch(List<String> alts, String p, int restPi, String s, int si) {
+  if (_match(p, restPi, s, si)) return true;
+  for (final alt in alts) {
+    for (var k = si + 1; k <= s.length; k++) {
+      if (_match(alt, 0, s.substring(si, k), 0) &&
+          _starMatch(alts, p, restPi, s, k)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/// Index of the `)` closing the `(` at [open], skipping nested groups,
+/// bracket classes, and escapes. Returns -1 when unbalanced.
+int _matchingParen(String p, int open) {
+  var depth = 0;
+  var i = open;
+  while (i < p.length) {
+    final c = p[i];
+    if (c == r'\') {
+      i += 2;
+      continue;
+    }
+    if (c == '[') {
+      final probe = _matchClass(p, i, ' ');
+      if (probe != null) {
+        i = probe.nextPi;
+        continue;
+      }
+    }
+    if (c == '(') {
+      depth++;
+    } else if (c == ')') {
+      depth--;
+      if (depth == 0) return i;
+    }
+    i++;
+  }
+  return -1;
+}
+
+/// Splits extglob group [content] on top-level `|`, respecting nesting.
+List<String> _splitAlternatives(String content) {
+  final alts = <String>[];
+  var depth = 0;
+  var start = 0;
+  var i = 0;
+  while (i < content.length) {
+    final c = content[i];
+    if (c == r'\') {
+      i += 2;
+      continue;
+    }
+    if (c == '[') {
+      final probe = _matchClass(content, i, ' ');
+      if (probe != null) {
+        i = probe.nextPi;
+        continue;
+      }
+    }
+    if (c == '(') {
+      depth++;
+    } else if (c == ')') {
+      depth--;
+    } else if (c == '|' && depth == 0) {
+      alts.add(content.substring(start, i));
+      start = i + 1;
+    }
+    i++;
+  }
+  alts.add(content.substring(start));
+  return alts;
 }
 
 ({bool matched, int nextPi})? _matchClass(String p, int pi, String c) {
